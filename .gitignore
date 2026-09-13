@@ -9,3 +9,8 @@
 # the game and are reinstalled on the machine that needs them — and GitHub rejects any
 # single file over 100 Mo outright, which libcef.so alone (227 Mo) would trigger.
 /addons/ziva_agent/
+
+# Four AI-generated images that the game never references, in the scene or in code.
+# They are also excluded from the export (see export_presets.cfg) so they do not cost
+# anything on the download; this only keeps them out of the file listing.
+/Assets/Gemini_Generated_Image_*.jpg
