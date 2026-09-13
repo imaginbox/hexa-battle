@@ -178,6 +178,13 @@ func is_host() -> bool:
 	return _table_owner > 0 and multiplayer.get_unique_id() == _table_owner
 
 
+## The peer that owns the table, or 0 while this peer has not learnt who it is. The
+## board aims its actions here, so it is readable from outside this node — which is
+## the one piece of the election the rest of the game actually needs.
+func table_owner() -> int:
+	return _table_owner
+
+
 ## Starts the round. Only the owner may, and only once the table is genuinely
 ## playable: two cards or more, and every one of them ready.
 func start_game() -> void:

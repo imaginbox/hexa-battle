@@ -83,13 +83,18 @@ func _ready() -> void:
 ## rather than authored into the scene. A VS match with no AI cards builds none, and
 ## then nothing on the board is automated.
 func _build_ai_commanders() -> void:
+	ai.process_mode = Node.PROCESS_MODE_DISABLED
+	# In a match the AI cards are played by the table's owner alone. Every peer building
+	# its own commanders would put one machine on every board, each marching the same
+	# army somewhere different, and none of them agreeing.
+	if GameState.in_room and not Net.is_host():
+		return
 	for seat in GameState.ai_seats:
 		var commander: AIController = AIController.new()
 		commander.seat = seat
 		commander.name = "AI%d" % seat
 		add_child(commander)
 		_ai_commanders.append(commander)
-	ai.process_mode = Node.PROCESS_MODE_DISABLED
 
 
 ## Starts or holds every AI commander at once.
@@ -179,9 +184,9 @@ func _on_battle_resolved(is_victory: bool, module_node: Node) -> void:
 		# 2. La forteresse rouge laisse place au château du joueur, avec un gros
 		# écrasement suivi d'un rebond.
 		var taken_from: int = current_boss_target.owner_seat
-		current_boss_target.owner_seat = GameState.local_seat
-		current_boss_target.update_visuals()
-		current_boss_target.trigger_climax_effect()
+		# Routed like every other action, so the keep changes hands on every screen at
+		# once rather than only on the one that fought for it.
+		grid.capture_stronghold(current_boss_target, GameState.local_seat)
 		# A room has no next level to offer, so the victory stops at the board —
 		# but it should still be announced, the same as a keep battered down.
 		if GameState.in_room:

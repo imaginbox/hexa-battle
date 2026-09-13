@@ -40,9 +40,26 @@ var _started_round: bool = false
 var _filled: bool = false
 var _said_hello: bool = false
 
+## Set by HEXA_SYNC_TEST: after the board is up, the host plays one action and both
+## peers print a fingerprint of their board, so the two can be compared line for line.
+var _sync_test: bool = false
+var _board: Node3D = null
+var _board_grid: GameGrid = null
+var _reported_at: float = 0.0
+var _acted: bool = false
+var _sync_done: bool = false
+## How long to stay alive after the fingerprint, set by HEXA_HOLD. The host needs a
+## few seconds on it, or it hangs up before the client has had its say.
+var _hold: float = 0.0
+var _sync_quit_at: float = 0.0
+
 
 ## How long to wait before starting the round, so the joiner is seated first.
 const AUTO_START_AT := 4.0
+## How long after the board is up the host plays, and how long after that both peers
+## report. The gap has to cover a network round-trip plus the pawn's flight.
+const SYNC_ACT_AFTER := 2.0
+const SYNC_CHECK_AFTER := 6.0
 
 
 func _on_game_started() -> void:
@@ -83,6 +100,11 @@ func _ready() -> void:
 		_auto_start = true
 	if OS.get_environment("HEXA_FILL_AI") == "1":
 		_fill_ai = true
+	if OS.get_environment("HEXA_SYNC_TEST") == "1":
+		_sync_test = true
+	var hold: String = OS.get_environment("HEXA_HOLD")
+	if hold.is_valid_float():
+		_hold = hold.to_float()
 
 
 func _on_failed(reason: String) -> void:
@@ -135,12 +157,83 @@ func _process(delta: float) -> void:
 		print("[probe] t=%5.1f  id=%d peers=%s  %s  is_host=%s" % [
 			_elapsed, multiplayer.get_unique_id(),
 			str(multiplayer.get_peers()), _slots_text(), str(Net.is_host())])
-	if _reported or _elapsed < _settle_seconds:
+	if not _reported:
+		# The wait lives inside the branch rather than in front of it: a guard that
+		# returns once we have reported would make every phase below unreachable and the
+		# probe would never quit.
+		if _elapsed < _settle_seconds:
+			return
+		_reported = true
+		_reported_at = _elapsed
+		_report_seating()
+		_report_board()
+		if not _sync_test:
+			get_tree().quit()
+	# The host plays one move, then both peers describe their board. Two fingerprints
+	# that disagree mean the action never travelled, or the boards drifted apart.
+	if not _sync_test:
 		return
-	_reported = true
-	_report_seating()
-	_report_board()
-	get_tree().quit()
+	if not _sync_done:
+		if Net.is_host() and not _acted and _elapsed >= _reported_at + SYNC_ACT_AFTER:
+			_acted = true
+			_play_sync_action()
+		if _elapsed >= _reported_at + SYNC_CHECK_AFTER:
+			_sync_done = true
+			_sync_quit_at = _elapsed + _hold
+			print("[probe] t=%5.1f  EMPREINTE APRÈS  %s" % [_elapsed, _fingerprint()])
+		return
+	if _hold <= 0.0 or _elapsed >= _sync_quit_at:
+		get_tree().quit()
+
+
+## Plays one move as the host, so the client has something it has to agree with. The
+## castle has ~25 troops and the neutral tiles 10, so the march takes one of them.
+func _play_sync_action() -> void:
+	if _board_grid == null:
+		print("[probe] pas de plateau — action impossible")
+		return
+	var from: HexTile = null
+	for coord in _board_grid.tiles:
+		var tile: HexTile = _board_grid.tiles[coord]
+		if tile.owner_seat == GameState.local_seat:
+			from = tile
+			break
+	if from == null:
+		print("[probe] aucune case à moi")
+		return
+	var targets: Array[HexTile] = _board_grid.targets_for(from)
+	if targets.is_empty():
+		print("[probe] aucune cible en portée")
+		return
+	print("[probe] t=%5.1f  ACTION  %s -> %s" % [
+		_elapsed, str(from.grid_coords), str(targets[0].grid_coords)])
+	_board_grid.execute_march(from, targets[0])
+
+
+## A fingerprint of the board, so two peers can be compared at a glance: per-card tile
+## and troop totals, plus a checksum folded over every tile's *structure*.
+##
+## Troops are left out of the checksum on purpose. Production runs on every peer, so
+## between two of the owner's corrections the counts legitimately differ by a trooper
+## or two; what must match to the digit is who owns what and what is standing on it.
+func _fingerprint() -> String:
+	if _board_grid == null:
+		return "(pas de plateau)"
+	var counts: Dictionary = {}
+	var troops: Dictionary = {}
+	var checksum: int = 0
+	for coord in _board_grid.tiles:
+		var tile: HexTile = _board_grid.tiles[coord]
+		checksum += (tile.owner_seat + 2) * 7 + tile.tile_type * 17 \
+			+ tile.unit_type * 19 + int(coord.x) * 23 + int(coord.y) * 29
+		if tile.owner_seat != HexTile.NEUTRAL:
+			counts[tile.owner_seat] = int(counts.get(tile.owner_seat, 0)) + 1
+			troops[tile.owner_seat] = int(troops.get(tile.owner_seat, 0)) + tile.troop_count
+	var parts: Array[String] = []
+	for seat in [0, 1, 2, 3]:
+		if counts.has(seat):
+			parts.append("s%d %d cases / %d troupes" % [seat, counts[seat], troops[seat]])
+	return "%s   structure=%d" % [" | ".join(parts), checksum]
 
 
 func _report_seating() -> void:
@@ -159,7 +252,9 @@ func _report_seating() -> void:
 func _report_board() -> void:
 	var board: Node = load("res://scenes/main.tscn").instantiate()
 	add_child(board)
-	var grid: Node = board.get_node("GameGrid")
+	_board = board
+	var grid: GameGrid = board.get_node("GameGrid")
+	_board_grid = grid
 	var castles: Array = []
 	for coord in grid.tiles:
 		var tile = grid.tiles[coord]
@@ -173,3 +268,4 @@ func _report_board() -> void:
 			tile.owner_seat, str(tile.grid_coords),
 			GameState.seat_color(tile.owner_seat).to_html(false),
 			"(MOI)" if tile.owner_seat == GameState.local_seat else ""])
+	print("[probe] t=%5.1f  EMPREINTE AVANT  %s" % [_elapsed, _fingerprint()])

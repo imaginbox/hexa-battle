@@ -97,6 +97,21 @@ const MINE_UPGRADE_COSTS := [80, 140]
 const RENFORT_COST := 60
 const RENFORT_TROOPS := 15
 
+# --- Synchronisation d'une partie ---------------------------------------------
+
+## How many integers one tile occupies in a board snapshot: its coordinates, owner,
+## garrison, kind, unit class, structure hit points, mine tier and structure ceiling.
+const SNAPSHOT_STRIDE := 9
+## How often the table's owner republishes the whole board, in seconds.
+##
+## Production runs on every peer so the numbers stay alive between syncs; this is what
+## keeps them honest. A 91-tile board is under 3 Ko, so it costs a few Ko a second —
+## cheap enough to be worth it as a blunt safety net. Everything that could go wrong
+## settles here within half a second, without any of it needing its own handshake: a
+## lost action, a peer that drifted on troop production, a client that joined the
+## board a frame late.
+const SYNC_INTERVAL := 0.5
+
 var tiles: Dictionary = {}
 var selected_tile: HexTile = null
 ## Tile currently under the cursor, tracked through the tiles' hover signals.
@@ -108,12 +123,35 @@ var hovered_tile: HexTile = null
 ## Distance from a tile centre to its vertices, derived from hex_size.
 var _tile_radius: float = 1.0
 
+## Seconds left before the owner republishes the board. Seeded to one full interval so
+## the very first broadcast waits for the joiners to have their board up, rather than
+## firing into a scene that is still loading.
+var _sync_left: float = 0.5
+## Peers that have opened their board and asked for one. The owner pushes snapshots
+## only to these: a reliable RPC aimed at a GameGrid that does not exist yet is
+## dropped with a "node not found", so shipping to a peer before it has said it is
+## ready is not just wasteful, it is an error.
+var _board_ready_peers: Dictionary = {}
+## Set while an action that came off the wire is being applied, so the guarded public
+## methods do not try to forward it back to the owner it just came from.
+var _applying_remote: bool = false
+
 
 func _ready() -> void:
 	generate_grid()
+	# Ask the owner for the board the moment ours exists. The owner republishes on a
+	# timer, so a peer whose scene came up between two ticks would otherwise sit on a
+	# freshly generated board until the next one — and a broadcast that arrived during
+	# the gap was aimed at a node that did not exist yet, which Godot answers with a
+	# "node not found" and drops. The request makes that window impossible.
+	if GameState.in_room and not Net.is_host():
+		var owner_id: int = Net.table_owner()
+		if owner_id > 0:
+			_request_snapshot.rpc_id(owner_id)
 
 
 func _process(delta: float) -> void:
+	_run_board_sync(delta)
 	if GameState.auto_attack:
 		_run_auto_attacks(delta)
 	if selected_tile == null or not target_arrow.is_active:
@@ -417,14 +455,24 @@ func build_mine(tile: HexTile, pay_with_troops: bool = false) -> bool:
 	if pay_with_troops:
 		if tile.troop_count < MINE_TROOP_COST:
 			return false
-		tile.troop_count -= MINE_TROOP_COST
 	elif not GameState.spend_gold(MINE_GOLD_COST):
 		return false
+	if not _route("build_mine", {"tile": tile.grid_coords, "troops": pay_with_troops}):
+		return true
+	_apply_build_mine(tile, pay_with_troops)
+	return true
+
+
+## The shared half of building a mine: the building itself. Gold is spent by whoever
+## pays and never travels — it is a per-player purse — but troops are shared state, so
+## that half of the price is charged here, where every peer will agree on it.
+func _apply_build_mine(tile: HexTile, paid_in_troops: bool) -> void:
+	if paid_in_troops:
+		tile.troop_count -= MINE_TROOP_COST
 	tile.build_mine()
 	tile.mine_level = 1
 	tile.gold_per_second = MINE_RATES[0]
 	tile.arm_structure(MINE_HP)
-	return true
 
 
 ## Reforme la garnison d'une case en une autre classe d'unité, contre de l'or.
@@ -433,15 +481,22 @@ func recruit(tile: HexTile, type: HexTile.UnitType) -> bool:
 		return false
 	if type == tile.unit_type:
 		return false
-	var cost: int = ARCHER_COST if type == HexTile.UnitType.ARCHER else CATAPULT_COST
-	if type != HexTile.UnitType.SOLDIER and not GameState.spend_gold(cost):
-		return false
+	if type != HexTile.UnitType.SOLDIER:
+		var cost: int = ARCHER_COST if type == HexTile.UnitType.ARCHER else CATAPULT_COST
+		if not GameState.spend_gold(cost):
+			return false
+	if not _route("recruit", {"tile": tile.grid_coords, "unit": type}):
+		return true
+	_apply_recruit(tile, type)
+	return true
+
+
+func _apply_recruit(tile: HexTile, type: int) -> void:
 	tile.unit_type = type
 	# Without this the badge and the label keep showing the old class: the recruit
 	# works, but nothing on the board would say so.
 	tile.update_visuals()
 	tile.trigger_bounce_effect()
-	return true
 
 
 ## Monte la mine d'un palier : elle rapporte plus, contre de l'or.
@@ -452,10 +507,16 @@ func upgrade_mine(tile: HexTile) -> bool:
 		return false
 	if not GameState.spend_gold(MINE_UPGRADE_COSTS[tile.mine_level - 1]):
 		return false
-	tile.mine_level += 1
+	if not _route("upgrade_mine", {"tile": tile.grid_coords}):
+		return true
+	_apply_upgrade_mine(tile)
+	return true
+
+
+func _apply_upgrade_mine(tile: HexTile) -> void:
+	tile.mine_level = mini(tile.mine_level + 1, MINE_RATES.size())
 	tile.gold_per_second = MINE_RATES[tile.mine_level - 1]
 	tile.trigger_bounce_effect()
-	return true
 
 
 ## Renfort d'urgence : des troupes tout de suite, contre de l'or.
@@ -466,9 +527,15 @@ func reinforce(tile: HexTile) -> bool:
 		return false
 	if not GameState.spend_gold(RENFORT_COST):
 		return false
+	if not _route("reinforce", {"tile": tile.grid_coords}):
+		return true
+	_apply_reinforce(tile)
+	return true
+
+
+func _apply_reinforce(tile: HexTile) -> void:
 	tile.add_troops(RENFORT_TROOPS)
 	tile.trigger_bounce_effect()
-	return true
 
 
 # --- Résolution des actions ---------------------------------------------------
@@ -478,6 +545,14 @@ func execute_march(from: HexTile, to: HexTile) -> void:
 	# included, comes through this one door, so nothing can out-range the rules.
 	if not is_valid_target(from, to):
 		return
+	if not _route("march", {"from": from.grid_coords, "to": to.grid_coords}):
+		return
+	_play_march(from, to)
+
+
+## The march itself, split out of [method execute_march] so an action coming back from
+## the table's owner runs the very same code a local drag does — pawn flight included.
+func _play_march(from: HexTile, to: HexTile) -> void:
 	match from.unit_type:
 		HexTile.UnitType.ARCHER:
 			_fire_volley(from, to)
@@ -491,7 +566,13 @@ func execute_march(from: HexTile, to: HexTile) -> void:
 ## fait démarrer le combat modal au lieu d'un corps-à-corps direct.
 func _assault(from: HexTile, to: HexTile) -> void:
 	if to.tile_type == HexTile.TileType.FORTRESS_BOSS and to.owner_seat != from.owner_seat:
-		boss_battle_triggered.emit(from, to)
+		# A keep is stormed by the one who reaches it and held by the one sitting on
+		# it, so only those two ever see the fight. The action is broadcast to every
+		# peer, and without this guard each of them would open its own modal — a
+		# spectator in a four-card match would be dragged into a duel that is not
+		# theirs, and two modals resolving independently could name two winners.
+		if from.owner_seat == GameState.local_seat or to.owner_seat == GameState.local_seat:
+			boss_battle_triggered.emit(from, to)
 		return
 	var send_amount: int = int(from.troop_count / 2.0)
 	var side: int = from.owner_seat
@@ -625,3 +706,209 @@ func resolve_regular_clash(target: HexTile, side: int, amount: int) -> void:
 			if lost_castle:
 				castle_fell.emit(defender)
 	target.update_label()
+
+
+# --- Synchronisation d'une partie ----------------------------------------------
+
+## The tile at `coords`, or null when the board has nothing there.
+func tile_at(coords: Variant) -> HexTile:
+	if typeof(coords) != TYPE_VECTOR2I:
+		return null
+	return tiles.get(coords)
+
+
+## The whole board as one flat array, so a peer that has drifted can be put back on
+## the same page in a single message.
+func snapshot() -> PackedInt32Array:
+	var data := PackedInt32Array()
+	for coord: Vector2i in tiles:
+		var tile: HexTile = tiles[coord]
+		data.append(coord.x)
+		data.append(coord.y)
+		data.append(tile.owner_seat)
+		data.append(tile.troop_count)
+		data.append(tile.tile_type)
+		data.append(tile.unit_type)
+		data.append(tile.structure_hp)
+		data.append(tile.mine_level)
+		# The ceiling travels too, so a peer that joined after a mine was built gets
+		# a health bar instead of a structure it cannot see the top of.
+		data.append(tile.structure_max_hp)
+	return data
+
+
+## Puts every tile back to the state in `data`. Deliberately silent — no bounce, no
+## pawn. This is the correction channel, not the action channel: the animations come
+## from the action broadcast, and replaying them here too would double every blow.
+func apply_snapshot(data: PackedInt32Array) -> void:
+	if data.size() % SNAPSHOT_STRIDE != 0:
+		return
+	var i: int = 0
+	while i < data.size():
+		var tile: HexTile = tiles.get(Vector2i(data[i], data[i + 1]))
+		if tile != null:
+			# owner_seat's setter redraws on its own and troop_count's refreshes the
+			# count, so only a class or building change needs the extra pass.
+			var look_changed: bool = tile.tile_type != data[i + 4] \
+				or tile.unit_type != data[i + 5]
+			var owner_changed: bool = tile.owner_seat != data[i + 2]
+			tile.owner_seat = data[i + 2]
+			tile.troop_count = data[i + 3]
+			tile.tile_type = data[i + 4]
+			tile.unit_type = data[i + 5]
+			tile.mine_level = maxi(data[i + 7], 1)
+			# The rate is derived, not stored: a peer that only ever saw the tier in a
+			# snapshot must still pay the right gold for it.
+			tile.gold_per_second = MINE_RATES[mini(tile.mine_level, MINE_RATES.size()) - 1]
+			# The ceiling is adopted as it arrives: a tile that had no structure here
+			# but has one in the snapshot needs it before the bar can mean anything.
+			tile.structure_max_hp = data[i + 8]
+			if tile.structure_max_hp > 0:
+				tile.structure_hp = data[i + 6]
+			if look_changed:
+				tile.update_visuals()
+			elif tile.structure_max_hp > 0:
+				tile.update_health_bar()
+		i += SNAPSHOT_STRIDE
+
+
+## Republishes the board. Owner only, and the owner's own copy is already the truth,
+## so there is nothing to apply on this side. Only peers that have announced their
+## board are addressed, so a late joiner is not sent one before its node exists.
+func _run_board_sync(delta: float) -> void:
+	if not GameState.in_room or not Net.is_host():
+		return
+	_sync_left -= delta
+	if _sync_left > 0.0:
+		return
+	_sync_left = SYNC_INTERVAL
+	if _board_ready_peers.is_empty():
+		return
+	var data: PackedInt32Array = snapshot()
+	for peer: int in _board_ready_peers:
+		_board_received.rpc_id(peer, data)
+
+
+@rpc("any_peer", "reliable")
+func _board_received(data: PackedInt32Array) -> void:
+	if Net.is_host():
+		return
+	apply_snapshot(data)
+
+
+## A peer that has just opened its board asks for the current one, and the owner notes
+## it as a subscriber. Answered only by the owner, whatever the request claims.
+@rpc("any_peer", "reliable")
+func _request_snapshot() -> void:
+	if not Net.is_host():
+		return
+	var peer: int = multiplayer.get_remote_sender_id()
+	_board_ready_peers[peer] = true
+	_board_received.rpc_id(peer, snapshot())
+
+
+# --- Acheminement des actions --------------------------------------------------
+
+## Hands an action to the table's owner when this peer is not it, and reports whether
+## the caller should go on and apply it here.
+##
+## Solo, and the owner itself, always get true, so the local path is untouched. Every
+## other peer gets false: it runs the action only when the owner's broadcast brings it
+## back, which is why everyone sees the same thing at the same moment instead of the
+## actor watching it a round-trip early.
+func _route(kind: String, fields: Dictionary) -> bool:
+	if _applying_remote or not GameState.in_room:
+		return true
+	var action: Dictionary = fields.duplicate()
+	action["kind"] = kind
+	action["seat"] = GameState.local_seat
+	if Net.is_host():
+		# The owner decides, and tells the others so their pawns fly at the same moment
+		# its own does.
+		_action_received.rpc(action)
+		return true
+	var owner_id: int = Net.table_owner()
+	if owner_id <= 0:
+		return false # no table to ask yet: the click is dropped rather than applied
+	_action_request.rpc_id(owner_id, action)
+	return false
+
+
+## An action from another peer, for the owner to decide on. Nothing here trusts the
+## sender beyond its card, and the action re-enters the same methods a local click
+## reaches, so it can only ever do what a click could have done.
+@rpc("any_peer", "reliable")
+func _action_request(action: Dictionary) -> void:
+	if not Net.is_host():
+		return
+	var seat: int = Net.seat_of_peer(multiplayer.get_remote_sender_id())
+	if seat < 0:
+		return
+	var kind: String = str(action.get("kind", ""))
+	# Taking a keep is the one action that is not about the sender's own tile — the
+	# tile being taken belongs to whoever is losing it — so it is the one case that is
+	# not checked against the sender's seat. It is also the one a client could lie
+	# about; the fight itself already happened in a modal neither side can verify.
+	if kind != "boss_won":
+		var source: HexTile = tile_at(action.get("from", action.get("tile", null)))
+		if source == null or source.owner_seat != seat:
+			return
+	# The payload's own "seat" is overwritten rather than read, so nobody can build or
+	# capture in another player's name.
+	action["seat"] = seat
+	_play_action(action)
+	_action_received.rpc(action)
+
+
+## The owner's copy of an action, run by every other peer.
+@rpc("any_peer", "reliable")
+func _action_received(action: Dictionary) -> void:
+	if Net.is_host():
+		return
+	_play_action(action)
+
+
+## Runs one action by name. A closed set rather than anything reflective: what can
+## travel is exactly what is listed here, and each case lands on the same applier a
+## local click uses.
+func _play_action(action: Dictionary) -> void:
+	_applying_remote = true
+	var tile: HexTile = tile_at(action.get("tile", action.get("from", null)))
+	match str(action.get("kind", "")):
+		"march":
+			var target: HexTile = tile_at(action.get("to", null))
+			if tile != null and target != null:
+				_play_march(tile, target)
+		"build_mine":
+			if tile != null:
+				_apply_build_mine(tile, bool(action.get("troops", false)))
+		"recruit":
+			if tile != null:
+				_apply_recruit(tile, int(action.get("unit", HexTile.UnitType.SOLDIER)))
+		"upgrade_mine":
+			if tile != null:
+				_apply_upgrade_mine(tile)
+		"reinforce":
+			if tile != null:
+				_apply_reinforce(tile)
+		"boss_won":
+			if tile != null:
+				_apply_capture(tile, int(action.get("seat", tile.owner_seat)))
+	_applying_remote = false
+
+
+## A keep taken by storm: whoever fought for it keeps it. Called by the main loop when
+## the battle modal comes back a win, and routed like anything else so the tile changes
+## hands on every screen at once.
+func capture_stronghold(tile: HexTile, seat: int) -> void:
+	if tile == null:
+		return
+	if not _route("boss_won", {"tile": tile.grid_coords}):
+		return
+	_apply_capture(tile, seat)
+
+
+func _apply_capture(tile: HexTile, seat: int) -> void:
+	tile.owner_seat = seat
+	tile.update_visuals()
+	tile.trigger_climax_effect()
