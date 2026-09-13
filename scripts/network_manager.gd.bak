@@ -1,0 +1,278 @@
+extends Node
+## Connection, seating and authority for a Ziva relay session.
+##
+## Lives as the `Net` autoload so it outlives the lobby -> game scene change.
+##
+## The relay is a message switch between peers, not a Godot server: peer id 1 is
+## a phantom slot the relay owns and never runs our code. Authority therefore
+## belongs to the lowest REAL peer id (anything above 1), which the first client
+## in a fresh room provably is — it lands as id 2 with nothing below it to race.
+## `multiplayer.is_server()` is false for everyone here and must not be used.
+
+## Seating changed: the lobby redraws its player list.
+signal seats_changed
+## The host started the round: every peer leaves the lobby for the board.
+signal game_started
+## A connection could not be opened. `reason` is meant for the player.
+signal failed(reason: String)
+## The room was left, or the relay dropped us.
+signal room_left
+
+const MIN_PLAYERS := 2
+const MAX_PLAYERS := 4
+## Colour and starting corner are decided by seat index alone, so every peer shows
+## the same table without negotiating anything. The colours themselves live in
+## [GameState] because the board needs them too, and the board must not depend on
+## this autoload.
+const CORNER_NAMES := ["corner Sud-Ouest", "corner Nord-Est", "corner Sud-Est", "corner Nord-Ouest"]
+
+var room_id: String = ""
+## Peer ids in seating order. A player's index here decides their colour and
+## corner, so this list is what every peer displays and what the board reads.
+var seats: Array[int] = []
+var is_host: bool = false
+var connected: bool = false
+var started: bool = false
+
+var _host_id: int = 0
+
+
+func _ready() -> void:
+	multiplayer.peer_connected.connect(_on_peer_connected)
+	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
+	multiplayer.connected_to_server.connect(_on_connected_to_server)
+	multiplayer.connection_failed.connect(_on_connection_failed)
+	multiplayer.server_disconnected.connect(_on_server_disconnected)
+	# Every change of seating is mirrored into GameState for the board. Hooking the
+	# signal rather than each caller keeps the mirror honest however the table moved.
+	seats_changed.connect(_publish_table)
+	_publish_table()
+
+
+## Mirrors the table into [GameState], which is where the board reads it from. See
+## [member GameState.seat_count] for why the board does not simply ask this node.
+func _publish_table() -> void:
+	GameState.configure_table(seats.size(), local_seat())
+
+
+# --- Connexion ----------------------------------------------------------------
+
+## Opens the relay room `id`. Everyone connects as a client of the relay; the
+## room's host is then simply whoever holds the lowest real peer id.
+func join_room(id: String) -> void:
+	var user_id: String = ProjectSettings.get_setting("ziva/multiplayer/user_id", "")
+	var game_id: String = ProjectSettings.get_setting("ziva/multiplayer/game_id", "")
+	var relay_url: String = ProjectSettings.get_setting("ziva/multiplayer/relay_url", "")
+	# Fail loud rather than fall back to a default origin: a missing value would
+	# connect to the wrong relay and waste a debug cycle.
+	if user_id.is_empty() or game_id.is_empty() or relay_url.is_empty():
+		failed.emit("Réglages du relais absents — demande à Ziva d'activer le multijoueur.")
+		return
+	room_id = id.strip_edges()
+	if room_id.is_empty():
+		room_id = "salon"
+	var url: String = "%s/r/%s?u=%s&g=%s&v=1" % [relay_url, room_id, user_id, game_id]
+	var peer := WebSocketMultiplayerPeer.new()
+	var err: int = peer.create_client(url)
+	if err != OK:
+		failed.emit("Impossible d'ouvrir le relais (erreur %d)." % err)
+		return
+	multiplayer.multiplayer_peer = peer
+
+
+func leave_room() -> void:
+	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+	seats.clear()
+	is_host = false
+	connected = false
+	started = false
+	_host_id = 0
+	room_left.emit()
+	seats_changed.emit()
+
+
+## Starts the round. Only the host may, and only once enough players are seated.
+func start_game() -> void:
+	if not is_host or seats.size() < MIN_PLAYERS or started:
+		return
+	started = true
+	_begin()
+	_begin_received.rpc()
+
+
+# --- Table ---------------------------------------------------------------------
+
+func player_count() -> int:
+	return seats.size()
+
+
+## The seat index of this peer, or -1 when it is not seated yet.
+func my_seat() -> int:
+	return seats.find(multiplayer.get_unique_id())
+
+
+## The seat this peer actually plays from. Unlike [method my_seat] this never
+## comes back unseated: with no room at all the player still commands seat 0, so
+## solo and a 1-player room are the same board with the same castle.
+func local_seat() -> int:
+	var found: int = seats.find(multiplayer.get_unique_id())
+	return found if found >= 0 else 0
+
+
+## Whether there is a real table to play against, as opposed to solo.
+func is_multiplayer() -> bool:
+	return seats.size() >= MIN_PLAYERS
+
+
+func board_radius() -> int:
+	return GameState.radius_for_players(seats.size())
+
+
+func color_for_seat(seat: int) -> Color:
+	return GameState.seat_color(seat)
+
+
+## Starting corner of a seat, as a name. The board turns the same index into
+## coordinates in [method GameGrid.corner_coords], which is written to this order.
+func corner_for_seat(seat: int) -> String:
+	return CORNER_NAMES[seat % CORNER_NAMES.size()]
+
+
+# --- Autorité ------------------------------------------------------------------
+
+## Real peers are everyone above the relay's phantom slot 1.
+func _real_peers() -> Array[int]:
+	var out: Array[int] = []
+	for p in multiplayer.get_peers():
+		if int(p) > 1:
+			out.append(int(p))
+	return out
+
+
+## Host = lowest real peer id. `include_self` is only ever true for the peer that
+## can prove it has no lower neighbour — id 2 on the connect burst. Everyone else
+## waits to be told, so nobody claims authority by accident.
+func _refresh_host(include_self: bool = true) -> void:
+	var candidates: Array[int] = _real_peers()
+	var me: int = multiplayer.get_unique_id()
+	if include_self and me > 1:
+		candidates.append(me)
+	candidates.sort()
+	# Never drop a known host to 0 on a transient empty view, so authority does
+	# not flicker off the real host mid-burst.
+	if candidates.size() > 0:
+		_host_id = int(candidates[0])
+	is_host = _host_id > 0 and multiplayer.get_unique_id() == _host_id
+
+
+func _on_connected_to_server() -> void:
+	connected = true
+	var me: int = multiplayer.get_unique_id()
+	# id 2 is the only id that provably has no lower peer, so it is the only peer
+	# that may treat itself as the host floor straight away.
+	_refresh_host(me == 2)
+	if is_host:
+		_rebuild_seats()
+		_broadcast_seats()
+
+
+func _on_peer_connected(id: int) -> void:
+	if id <= 1:
+		return
+	# Self is a candidate here. The `include_self = false` guard belongs to the
+	# connect burst alone (see _on_connected_to_server), where a peer's roster may
+	# not yet list lower peers; applying it on a join makes the acting host drop
+	# itself from the candidate set and hand authority to the newcomer, after which
+	# nobody publishes a table at all.
+	_refresh_host(true)
+	if is_host:
+		_rebuild_seats()
+		_broadcast_seats()
+	seats_changed.emit()
+
+
+func _on_peer_disconnected(id: int) -> void:
+	if id <= 1:
+		return
+	# Reactive failover: recompute from the roster, which is now authoritative. If
+	# that makes us the new lowest peer we adopt the table immediately — no timer
+	# and no grace window.
+	_refresh_host()
+	if is_host:
+		_rebuild_seats()
+		_broadcast_seats()
+	seats_changed.emit()
+
+
+func _on_connection_failed() -> void:
+	connected = false
+	failed.emit("Connexion au salon « %s » refusée." % room_id)
+
+
+func _on_server_disconnected() -> void:
+	leave_room()
+
+
+# --- Sièges --------------------------------------------------------------------
+
+## Rebuilds the seating order from the live roster, keeping the existing order
+## for whoever is still present and appending newcomers by id. Seats therefore
+## only shuffle when the host itself had to change.
+func _rebuild_seats() -> void:
+	var alive: Array[int] = [multiplayer.get_unique_id()]
+	for id in _real_peers():
+		if id != multiplayer.get_unique_id():
+			alive.append(id)
+	var kept: Array[int] = []
+	for id in seats:
+		if alive.has(id):
+			kept.append(id)
+	for id in alive:
+		if not kept.has(id):
+			kept.append(id)
+	seats = kept
+
+
+func _apply_seats(new_seats: Array) -> void:
+	# Copy before clearing. Arrays are passed by reference, and _broadcast_seats
+	# hands us `seats` itself — clearing first would wipe the very table we are
+	# trying to install, leaving every peer seated on nothing.
+	var incoming: Array = new_seats.duplicate()
+	seats.clear()
+	for id in incoming:
+		seats.append(int(id))
+
+
+func _broadcast_seats() -> void:
+	_apply_seats(seats)
+	# rpc() reaches every other peer, so the host applies its own copy directly.
+	_seats_received.rpc(seats)
+	seats_changed.emit()
+
+
+@rpc("any_peer", "reliable")
+func _seats_received(new_seats: Array) -> void:
+	var sender: int = multiplayer.get_remote_sender_id()
+	# A peer that joined after the host's connect burst never observed it, so its
+	# `_host_id` is still 0 and it would reject the one table it most needs. The
+	# first table handed to a peer that knows of no host is therefore trusted, and
+	# its sender adopted as the host. After that the strict check applies, so a
+	# house that already has a host cannot be hijacked by a later arrival.
+	if _host_id == 0 and sender > 1:
+		_host_id = sender
+	if sender != _host_id:
+		return
+	_apply_seats(new_seats)
+	seats_changed.emit()
+
+
+@rpc("any_peer", "reliable")
+func _begin_received() -> void:
+	if multiplayer.get_remote_sender_id() != _host_id:
+		return
+	_begin()
+
+
+func _begin() -> void:
+	started = true
+	game_started.emit()

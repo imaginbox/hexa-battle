@@ -1,0 +1,76 @@
+name: Export web build and publish to GitHub Pages
+
+# Every push to main rebuilds the game in the browser and republishes it, so the
+# link you share is always the current code. Nothing needs Godot installed anywhere:
+# the runner downloads the engine and its export templates itself.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  # Must match the Godot the project is built with (see config/features in
+  # project.godot). The template folder is named "<version>.stable" and the export
+  # silently finds no templates if this is off, so it is worth double-checking.
+  GODOT_VERSION: 4.7.1
+  GODOT_RELEASE: 4.7.1-stable
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Godot and its export templates
+        run: |
+          set -euo pipefail
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          curl -sSL -o godot.zip  "${base}/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          curl -sSL -o templates.tpz "${base}/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          unzip -q godot.zip
+          chmod +x "Godot_v${GODOT_RELEASE}_linux.x86_64"
+          sudo mv "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          mkdir -p "$HOME/.local/share/godot/export_templates"
+          unzip -q templates.tpz
+          mv templates "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
+      - name: Import the project
+        run: |
+          # The .godot/ cache is gitignored, so the runner starts with nothing
+          # imported. Without this pass the export packs resources that were never
+          # imported and the game fails at load. --import is the modern spelling;
+          # the headless editor pass does the same on builds that lack it.
+          godot --headless --path . --import || godot --headless --path . --editor --quit
+
+      - name: Export the web build
+        run: |
+          godot --headless --path . --export-release "Web" build/web/index.html
+          # Belt and braces: if Pages ever serves this through Jekyll, a leading
+          # underscore in any filename would be swallowed.
+          touch build/web/.nojekyll
+          du -sh build/web
+
+      - name: Upload the Pages artefact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    needs: export
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

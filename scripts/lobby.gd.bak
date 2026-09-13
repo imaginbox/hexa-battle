@@ -1,0 +1,324 @@
+extends Control
+## Front end: choose a transport, join a match, see who is at the table, and start
+## the round.
+##
+## Built in code, like the other overlay screens, so the scene stays a bare root
+## and the whole lobby lives in one file.
+
+const GAME_SCENE := "res://scenes/main.tscn"
+
+const COLOR_INK := Color("1b2430")
+## Muted fill for the transport button that is not selected.
+const COLOR_TOGGLE_OFF := Color("c9c2b6")
+
+var _mode_online_button: Button
+var _mode_local_button: Button
+var _target_label: Label
+## Holds a relay room name or an ENet address, whichever the transport needs.
+var _target_edit: LineEdit
+var _status: Label
+var _map_label: Label
+var _seats_box: VBoxContainer
+var _start_button: Button
+var _host_button: Button
+var _join_button: Button
+var _solo_button: Button
+var _leave_button: Button
+
+
+func _ready() -> void:
+	_build()
+	Net.seats_changed.connect(_refresh)
+	Net.session_ended.connect(_refresh)
+	Net.failed.connect(_on_failed)
+	Net.game_started.connect(_on_game_started)
+	_refresh()
+
+
+# --- Construction --------------------------------------------------------------
+
+func _build() -> void:
+	var backdrop := ColorRect.new()
+	backdrop.color = Color("17212b")
+	backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+	add_child(backdrop)
+
+	var title := Label.new()
+	title.text = "HEXA BATTLE"
+	title.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	title.offset_left = -400.0
+	title.offset_top = 60.0
+	title.offset_right = 400.0
+	title.offset_bottom = 130.0
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 52)
+	title.add_theme_color_override("font_color", Color("ffd166"))
+	add_child(title)
+
+	var card := PanelContainer.new()
+	card.set_anchors_preset(Control.PRESET_CENTER)
+	card.offset_left = -350.0
+	card.offset_top = -215.0
+	card.offset_right = 350.0
+	card.offset_bottom = 235.0
+	card.add_theme_stylebox_override("panel", _card_style())
+	add_child(card)
+
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 16)
+	card.add_child(column)
+
+	# Which transport, and therefore what the row below means: on the relay you join
+	# a room and the host is simply whoever arrived first, so there is nothing to
+	# host. On ENet somebody has to run the server, so the row is an address and
+	# hosting and joining are two different buttons.
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 12)
+	column.add_child(mode_row)
+
+	var mode_label := Label.new()
+	mode_label.text = "MODE"
+	mode_label.custom_minimum_size = Vector2(96, 0)
+	mode_label.add_theme_font_size_override("font_size", 20)
+	mode_label.add_theme_color_override("font_color", COLOR_INK)
+	mode_row.add_child(mode_label)
+
+	_mode_online_button = _make_button(mode_row, "EN LIGNE", _on_mode_online_pressed)
+	_mode_local_button = _make_button(mode_row, "LOCAL (LAN)", _on_mode_local_pressed)
+
+	var target_row := HBoxContainer.new()
+	target_row.add_theme_constant_override("separation", 12)
+	column.add_child(target_row)
+
+	_target_label = Label.new()
+	_target_label.custom_minimum_size = Vector2(96, 0)
+	_target_label.add_theme_font_size_override("font_size", 20)
+	_target_label.add_theme_color_override("font_color", COLOR_INK)
+	target_row.add_child(_target_label)
+
+	_target_edit = LineEdit.new()
+	_target_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_target_edit.custom_minimum_size = Vector2(220, 44)
+	_target_edit.add_theme_font_size_override("font_size", 20)
+	target_row.add_child(_target_edit)
+
+	var buttons := HBoxContainer.new()
+	buttons.add_theme_constant_override("separation", 10)
+	buttons.alignment = BoxContainer.ALIGNMENT_CENTER
+	column.add_child(buttons)
+
+	_host_button = _make_button(buttons, "HÉBERGER", _on_host_pressed)
+	_join_button = _make_button(buttons, "REJOINDRE", _on_join_pressed)
+	_leave_button = _make_button(buttons, "QUITTER", _on_leave_pressed)
+	_solo_button = _make_button(buttons, "SOLO", _on_solo_pressed)
+
+	_status = Label.new()
+	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_status.add_theme_font_size_override("font_size", 18)
+	_status.add_theme_color_override("font_color", COLOR_INK)
+	column.add_child(_status)
+
+	_map_label = Label.new()
+	_map_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_map_label.add_theme_font_size_override("font_size", 17)
+	_map_label.add_theme_color_override("font_color", Color("5b6b7f"))
+	column.add_child(_map_label)
+
+	_seats_box = VBoxContainer.new()
+	_seats_box.add_theme_constant_override("separation", 8)
+	column.add_child(_seats_box)
+
+	_start_button = _make_button(column, "COMMENCER LA PARTIE", _on_start_pressed)
+	_start_button.custom_minimum_size = Vector2(340, 52)
+	_sync_transport_ui()
+
+
+func _make_button(parent: Node, text: String, handler: Callable) -> Button:
+	var button := Button.new()
+	button.text = text
+	button.custom_minimum_size = Vector2(200, 46)
+	button.add_theme_font_size_override("font_size", 18)
+	button.add_theme_color_override("font_color", COLOR_INK)
+	button.add_theme_stylebox_override("normal", _button_style(Color("f5a623")))
+	button.add_theme_stylebox_override("hover", _button_style(Color("ffc046")))
+	button.add_theme_stylebox_override("pressed", _button_style(Color("d9821a")))
+	button.add_theme_stylebox_override("disabled", _button_style(Color("b9b2a4")))
+	button.pressed.connect(handler)
+	parent.add_child(button)
+	return button
+
+
+func _card_style() -> StyleBoxFlat:
+	var box := StyleBoxFlat.new()
+	box.bg_color = Color(0.968627, 0.945098, 0.898039, 0.98)
+	box.border_color = COLOR_INK
+	box.set_border_width_all(4)
+	box.set_corner_radius_all(18)
+	box.content_margin_left = 26.0
+	box.content_margin_right = 26.0
+	box.content_margin_top = 22.0
+	box.content_margin_bottom = 22.0
+	return box
+
+
+func _button_style(color: Color) -> StyleBoxFlat:
+	var box := StyleBoxFlat.new()
+	box.bg_color = color
+	box.border_color = COLOR_INK
+	box.set_border_width_all(3)
+	box.set_corner_radius_all(12)
+	box.content_margin_left = 12.0
+	box.content_margin_right = 12.0
+	box.content_margin_top = 8.0
+	box.content_margin_bottom = 8.0
+	return box
+
+
+# --- Affichage -----------------------------------------------------------------
+
+## Redraws everything from `Net`: the status line, the table, the board the
+## current head count would get, and whether the round can start.
+func _refresh() -> void:
+	var seated: int = Net.player_count()
+	_status.text = _connection_line(seated)
+
+	var radius: int = Net.board_radius()
+	_map_label.text = "Plateau : rayon %d, %d cases — un joueur par coin" % [
+		radius, _tile_count(radius)]
+
+	for child in _seats_box.get_children():
+		_seats_box.remove_child(child)
+		child.queue_free()
+	for seat in seated:
+		_seats_box.add_child(_seat_row(seat))
+
+	var hosting: bool = Net.is_host()
+	_start_button.disabled = not hosting or seated < Net.MIN_PLAYERS
+	if not Net.connected:
+		_start_button.text = "HORS LIGNE"
+	elif hosting:
+		_start_button.text = "COMMENCER LA PARTIE"
+	else:
+		_start_button.text = "EN ATTENTE DE L'HÔTE…"
+	_leave_button.disabled = not Net.connected
+	# Hosting and joining are mutually exclusive, so both close once one is open.
+	_host_button.disabled = Net.connected
+	_join_button.disabled = Net.connected
+	# The transport cannot change under a live match either.
+	_mode_online_button.disabled = Net.connected
+	_mode_local_button.disabled = Net.connected
+
+
+## Where we stand, in one sentence, so a refused join is legible without reading
+## the console. What "online" means differs by transport, so the wording does too.
+func _connection_line(seated: int) -> String:
+	if not Net.connected:
+		if Net.is_online_mode():
+			return "Hors ligne — rejoins le salon « %s » pour jouer en ligne (l'hôte est automatique)." % Net.room
+		return "Hors ligne — héberge, ou rejoins %s pour tester sur ce PC." % Net.DEFAULT_ADDRESS
+	var where: String
+	if Net.is_online_mode():
+		where = "Salon « %s »" % Net.room
+	elif Net.is_host():
+		where = "Hébergement sur le port %d" % Net.port
+	else:
+		where = "Connecté à %s:%d" % [Net.address, Net.port]
+	var seat: int = Net.my_seat()
+	if seat < 0:
+		return "%s — en attente de la table…" % where
+	return "%s — %d/%d joueurs%s   ·   tu es sur le %s" % [
+		where, seated, Net.MAX_PLAYERS,
+		"   (tu es l'hôte)" if Net.is_host() else "",
+		Net.corner_for_seat(seat)]
+
+
+func _seat_row(seat: int) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+
+	var swatch := ColorRect.new()
+	swatch.color = Net.color_for_seat(seat)
+	swatch.custom_minimum_size = Vector2(28, 28)
+	row.add_child(swatch)
+
+	var label := Label.new()
+	var mine: bool = seat == Net.my_seat()
+	label.text = "Joueur %d   ·   %s%s" % [
+		seat + 1, Net.corner_for_seat(seat), "   (toi)" if mine else ""]
+	label.add_theme_font_size_override("font_size", 18)
+	label.add_theme_color_override("font_color", COLOR_INK)
+	row.add_child(label)
+	return row
+
+
+## Tiles on a hex map of the given radius.
+func _tile_count(radius: int) -> int:
+	return 3 * radius * (radius + 1) + 1
+
+
+# --- Actions -------------------------------------------------------------------
+
+func _on_mode_online_pressed() -> void:
+	Net.select_online_mode()
+	_sync_transport_ui()
+	_refresh()
+
+
+func _on_mode_local_pressed() -> void:
+	Net.select_local_mode()
+	_sync_transport_ui()
+	_refresh()
+
+
+## Relabels the transport-dependent controls. Called only on a mode change and at
+## build time, so it never overwrites what the player is in the middle of typing.
+func _sync_transport_ui() -> void:
+	var online: bool = Net.is_online_mode()
+	_target_label.text = "SALON" if online else "ADRESSE"
+	_target_edit.text = Net.room if online else Net.address
+	# On the relay there is nothing to host: the first peer in the room owns the
+	# table, and that happens on its own.
+	_host_button.visible = not online
+	_join_button.text = "REJOINDRE / HÉBERGER" if online else "REJOINDRE"
+	_set_toggle(_mode_online_button, online)
+	_set_toggle(_mode_local_button, not online)
+
+
+## Paints a mode button as selected or not.
+func _set_toggle(button: Button, active: bool) -> void:
+	var fill: Color = Color("f5a623") if active else COLOR_TOGGLE_OFF
+	button.add_theme_stylebox_override("normal", _button_style(fill))
+	button.add_theme_stylebox_override("hover", _button_style(fill.lightened(0.15)))
+	button.add_theme_stylebox_override("pressed", _button_style(fill.darkened(0.15)))
+	button.add_theme_stylebox_override("disabled", _button_style(fill))
+
+
+## Opens a match: a server on this machine when local, the relay room when online.
+func _on_host_pressed() -> void:
+	Net.open_match()
+
+
+func _on_join_pressed() -> void:
+	Net.join_match(_target_edit.text)
+
+
+func _on_leave_pressed() -> void:
+	Net.leave_room()
+
+
+func _on_start_pressed() -> void:
+	Net.start_game()
+
+
+## Single player: straight to the board with no match at all.
+func _on_solo_pressed() -> void:
+	Net.leave_room()
+	get_tree().change_scene_to_file(GAME_SCENE)
+
+
+func _on_failed(reason: String) -> void:
+	_status.text = reason
+
+
+func _on_game_started() -> void:
+	get_tree().change_scene_to_file(GAME_SCENE)

@@ -1,0 +1,81 @@
+[gd_scene load_steps=11 format=3]
+
+[ext_resource type="Script" path="res://scripts/game_grid.gd" id="1_gamegrid"]
+[ext_resource type="PackedScene" path="res://scenes/hex_tile.tscn" id="2_hextile"]
+[ext_resource type="Script" path="res://scripts/battle_hud.gd" id="3_battlehud"]
+[ext_resource type="Script" path="res://scripts/main_loop.gd" id="4_mainloop"]
+[ext_resource type="PackedScene" path="res://scenes/battles/battle_troops_module.tscn" id="5_battlemodule"]
+[ext_resource type="PackedScene" path="res://Assets/Le Pion Épée  Attaquant.glb" id="6_pawn"]
+[ext_resource type="PackedScene" path="res://Assets/Le Coffre de Victoire (Récompense fin de manche).glb" id="7_chest"]
+[ext_resource type="PackedScene" path="res://scenes/target_arrow.tscn" id="8_targetarrow"]
+[ext_resource type="Script" path="res://scripts/ai_controller.gd" id="9_ai"]
+
+[sub_resource type="Environment" id="Environment_main"]
+background_mode = 1
+background_color = Color(0.219608, 0.713726, 1, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.839216, 0.917647, 0.972549, 1)
+ambient_light_energy = 0.4
+ssao_enabled = true
+tonemap_mode = 0
+
+[node name="Main" type="Node3D"]
+script = ExtResource("4_mainloop")
+current_battle_module_scene = ExtResource("5_battlemodule")
+victory_chest_scene = ExtResource("7_chest")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_main")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+position = Vector3(0, 12, 0)
+rotation_degrees = Vector3(-55, 35, 0)
+light_color = Color(1, 0.964706, 0.898039, 1)
+light_energy = 0.8
+shadow_enabled = true
+
+[node name="Camera3D" type="Camera3D" parent="."]
+position = Vector3(0, 10.5, 10.5)
+rotation_degrees = Vector3(-45, 0, 0)
+current = true
+fov = 55.0
+
+[node name="GameGrid" type="Node3D" parent="." groups=["battle_grid"]]
+script = ExtResource("1_gamegrid")
+hex_scene = ExtResource("2_hextile")
+pawn_scene = ExtResource("6_pawn")
+grid_radius = 3
+hex_size = 1.8
+
+[node name="TargetArrow" parent="GameGrid" instance=ExtResource("8_targetarrow")]
+
+[node name="AIController" type="Node" parent="."]
+script = ExtResource("9_ai")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+script = ExtResource("3_battlehud")
+
+[node name="Status" type="Label" parent="HUD"]
+offset_left = 24.0
+offset_top = 18.0
+offset_right = 1256.0
+offset_bottom = 52.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 28
+text = "TOI 1 cases, 25 troupes     J2 1 cases, 80 troupes     IA NIVEAU 1"
+
+[node name="Hint" type="Label" parent="HUD"]
+offset_left = 24.0
+offset_top = 56.0
+offset_right = 1100.0
+offset_bottom = 82.0
+theme_override_colors/font_color = Color(1, 1, 1, 0.85)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 18
+text = "Press your blue tile, then release over another tile to march half its troops. Release on the red fortress to storm it."
+
+[node name="ModalContainer" type="CanvasLayer" parent="."]
+layer = 10

@@ -1,0 +1,11 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Export output. CI builds it; nothing here belongs in the repository.
+/build/
+
+# Ziva's editor tooling. Roughly 1.5 Go of per-machine binaries that are not part of
+# the game and are reinstalled on the machine that needs them — and GitHub rejects any
+# single file over 100 Mo outright, which libcef.so alone (227 Mo) would trigger.
+/addons/ziva_agent/
