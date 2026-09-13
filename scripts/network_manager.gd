@@ -78,6 +78,20 @@ var started: bool = false
 ## is the elected lowest real peer, and stays 0 until this peer learns who it is.
 var _table_owner: int = 0
 
+## How many relay connection attempts have already failed, and the ceiling.
+##
+## The relay is a Cloudflare Worker, so its hostname resolves to a pool of edge IPs
+## and a resolver is free to hand back any of them. Some of that pool is unreachable
+## from a given network — a DNS that returns a black-holed edge produces exactly the
+## flaky "connecting… never connects" a single attempt gives. Reconnecting rolls the
+## dice again and, in practice, lands on a working edge within a couple of tries.
+const RELAY_MAX_ATTEMPTS := 6
+## Seconds between two relay attempts, so a failing burst does not hammer the resolver.
+const RELAY_RETRY_DELAY := 0.8
+var _relay_attempts: int = 0
+## Set while a retry is already pending, so two failures cannot stack loops.
+var _relay_retry_pending: bool = false
+
 
 func _ready() -> void:
 	multiplayer.peer_connected.connect(_on_peer_connected)
@@ -208,6 +222,14 @@ func _teardown() -> void:
 ## Relay: every peer, host included, simply becomes a client of the relay.
 func _join_relay() -> void:
 	_teardown()
+	_relay_attempts = 0
+	_relay_retry_pending = false
+	_open_relay_peer()
+
+
+## Opens one relay connection. Split out of [method _join_relay] so a failed attempt
+## can be retried without going through [method _teardown]'s lobby-visible signals.
+func _open_relay_peer() -> void:
 	var user_id: String = ProjectSettings.get_setting("ziva/multiplayer/user_id", "")
 	var game_id: String = ProjectSettings.get_setting("ziva/multiplayer/game_id", "")
 	var relay_url: String = ProjectSettings.get_setting("ziva/multiplayer/relay_url", "")
@@ -220,6 +242,13 @@ func _join_relay() -> void:
 	if target.is_empty():
 		target = DEFAULT_ROOM
 	room = target
+	# Cloudflare hands the relay hostname out as a pool of edge IPs, and a resolver
+	# may return one this network cannot reach — a filtered edge, or an IPv6 address
+	# on a link with no working IPv6. Godot caches the first answer and keeps dialling
+	# the same dead address, which is what makes the relay look "down" when it is not.
+	# Dropping the cached answer before every attempt costs nothing and lets each try
+	# draw a fresh one; in practice a good edge turns up within a couple of tries.
+	IP.clear_cache(_relay_host())
 	var url: String = "%s/r/%s?u=%s&g=%s&v=1" % [relay_url, target, user_id, game_id]
 	var peer := WebSocketMultiplayerPeer.new()
 	var err: int = peer.create_client(url)
@@ -227,6 +256,43 @@ func _join_relay() -> void:
 		failed.emit("Impossible d'ouvrir le relais (erreur %d)." % err)
 		return
 	multiplayer.multiplayer_peer = peer
+	_arm_relay_watchdog()
+
+
+## The bare host of the relay URL, so the DNS cache can be addressed by name.
+func _relay_host() -> String:
+	var relay_url: String = ProjectSettings.get_setting("ziva/multiplayer/relay_url", "")
+	var host: String = relay_url
+	for prefix in ["wss://", "ws://", "https://", "http://"]:
+		if host.begins_with(prefix):
+			host = host.substr(prefix.length())
+			break
+	var slash: int = host.find("/")
+	if slash >= 0:
+		host = host.substr(0, slash)
+	return host
+
+
+## How long a relay attempt may stay silent before it is treated as a dead end. A
+## black-holed edge does not always raise `connection_failed` — the socket simply
+## never settles — so waiting on that signal alone leaves the player stuck on
+## "connecting…" for ever. This timer is what turns that silence into a retry.
+const RELAY_CONNECT_TIMEOUT := 6.0
+var _relay_watchdog: SceneTreeTimer = null
+
+
+## Starts (or restarts) the silence timer for the current attempt. Cancelled the
+## moment the connection lands via [method _on_connected_to_server].
+func _arm_relay_watchdog() -> void:
+	_relay_watchdog = get_tree().create_timer(RELAY_CONNECT_TIMEOUT)
+	var token: SceneTreeTimer = _relay_watchdog
+	await token.timeout
+	# A newer attempt replaced this timer; its own watchdog is the one that matters.
+	if _relay_watchdog != token:
+		return
+	if connected or transport != Transport.RELAY:
+		return
+	_on_connection_failed()
 
 
 ## ENet: opens a server on [member port] and seats this peer at seat 0.
@@ -307,6 +373,8 @@ func corner_for_seat(seat: int) -> String:
 
 func _on_connected_to_server() -> void:
 	connected = true
+	# The attempt landed: disarm the silence timer so it cannot fire a false failure.
+	_relay_watchdog = null
 	if transport == Transport.ENET:
 		# ENet's server is peer 1 and owns the table outright. It sends ours as soon
 		# as it has processed our arrival. (This signal never fires on the server
@@ -376,9 +444,29 @@ func _on_peer_disconnected(id: int) -> void:
 func _on_connection_failed() -> void:
 	connected = false
 	if transport == Transport.RELAY:
+		# A relay hostname resolves to a pool of Cloudflare edges, and a resolver can
+		# hand back one this network cannot reach. That is transient, not a refusal —
+		# so the connection is retried before the player is told anything, and only a
+		# run of failures ends in a message.
+		if _relay_attempts < RELAY_MAX_ATTEMPTS and not _relay_retry_pending:
+			_relay_attempts += 1
+			_relay_retry_pending = true
+			_retry_relay_soon()
+			return
 		failed.emit("Connexion au salon « %s » refusée." % room)
 	else:
 		failed.emit("Connexion à %s:%d refusée." % [address, port])
+
+
+## Waits out [constant RELAY_RETRY_DELAY] then rolls a fresh relay connection. The
+## timer keeps the retry off the signal stack, so a synchronous failure cannot recurse.
+func _retry_relay_soon() -> void:
+	await get_tree().create_timer(RELAY_RETRY_DELAY).timeout
+	_relay_retry_pending = false
+	# The player may have left the lobby while the timer ran; nothing to reopen then.
+	if transport != Transport.RELAY or connected:
+		return
+	_open_relay_peer()
 
 
 func _on_server_disconnected() -> void:
