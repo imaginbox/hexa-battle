@@ -247,7 +247,8 @@ func _open_relay_peer() -> void:
 	# on a link with no working IPv6. Godot caches the first answer and keeps dialling
 	# the same dead address, which is what makes the relay look "down" when it is not.
 	# Dropping the cached answer before every attempt costs nothing and lets each try
-	# draw a fresh one; in practice a good edge turns up within a couple of tries.
+	# draw a fresh one; combined with the retry below, a good edge is usually reached
+	# within a couple of tries.
 	IP.clear_cache(_relay_host())
 	var url: String = "%s/r/%s?u=%s&g=%s&v=1" % [relay_url, target, user_id, game_id]
 	var peer := WebSocketMultiplayerPeer.new()

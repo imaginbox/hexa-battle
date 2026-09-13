@@ -13,6 +13,8 @@ const BOARD_SCENE := "res://scenes/main.tscn"
 const VS_SCENE := "res://scenes/ui/vs_menu.tscn"
 
 var _room_label: Label
+var _code_label: Label
+var _copy_button: Button
 var _card_panels: Array[PanelContainer] = []
 var _card_bodies: Array[VBoxContainer] = []
 var _ready_button: Button
@@ -50,6 +52,7 @@ func _build() -> void:
 
 	# What the host reads out to invite people.
 	_room_label = UiStyle.heading(column, "", 21, UiStyle.PALE)
+	column.add_child(_build_invite())
 
 	# The four cards, sharing the width equally.
 	var cards_row := HBoxContainer.new()
@@ -69,6 +72,35 @@ func _build() -> void:
 	UiStyle.button(bottom, "QUITTER LA SALLE", _on_leave_pressed, Vector2(230, 42), 17)
 	_status = UiStyle.note(bottom, "", 16, UiStyle.PALE)
 	_status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+
+## The invitation line: the room code in large type, with a one-click copy, because
+## the whole point of a code is to be passed to somebody else. A LAN match has no code
+## to share, so the row hides itself there.
+##
+## The copy button puts the code on the OS clipboard rather than only showing it: the
+## player is going to send it through Discord or a chat, and retyping a code by hand is
+## exactly the step that makes people give up on inviting anyone.
+func _build_invite() -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 12)
+
+	var caption := Label.new()
+	caption.text = "CODE"
+	caption.add_theme_font_size_override("font_size", 18)
+	caption.add_theme_color_override("font_color", UiStyle.MUTED)
+	row.add_child(caption)
+
+	_code_label = Label.new()
+	_code_label.add_theme_font_size_override("font_size", 30)
+	_code_label.add_theme_color_override("font_color", UiStyle.ACCENT)
+	_code_label.add_theme_color_override("font_outline_color", UiStyle.INK)
+	_code_label.add_theme_constant_override("outline_size", 6)
+	row.add_child(_code_label)
+
+	_copy_button = UiStyle.button(row, "COPIER", _on_copy_pressed, Vector2(130, 44), 17)
+	return row
 
 
 ## The frame of one seat card. Its contents are rebuilt on every refresh, because
@@ -127,10 +159,29 @@ func _build_chat() -> PanelContainer:
 
 func _refresh() -> void:
 	_room_label.text = _room_line()
+	# The code is only worth showing for a private relay room. A LAN match is reached
+	# by address, and the common room is reached by the quick-match button, so neither
+	# has a code to hand to anybody.
+	var show_code: bool = Net.connected and Net.is_online_mode() and Net.room != Net.DEFAULT_ROOM
+	_code_label.visible = show_code
+	_copy_button.visible = show_code
+	if show_code:
+		_code_label.text = Net.room
 	for seat in _card_panels.size():
 		_fill_card(seat)
 	_update_ready_button()
 	_status.text = _status_line()
+
+
+## Puts the room code on the clipboard and says so on the button for a beat, so the
+## click is visibly answered. Restored on a timer rather than left as "COPIÉ", because
+## the player may copy twice and the label should read the same both times.
+func _on_copy_pressed() -> void:
+	DisplayServer.clipboard_set(Net.room)
+	_copy_button.text = "COPIÉ !"
+	await get_tree().create_timer(1.2).timeout
+	if is_instance_valid(_copy_button):
+		_copy_button.text = "COPIER"
 
 
 ## Rebuilds one card from the table.
@@ -227,6 +278,8 @@ func _room_line() -> String:
 	if not Net.is_online_mode():
 		return "Partie locale — les autres rejoignent %s (port %d)" % [Net.address, Net.port]
 	if Net.active_count() <= 1:
+		if Net.room == Net.DEFAULT_ROOM:
+			return "Salon commun — les autres te rejoignent avec PARTIE RAPIDE."
 		return "Salle « %s » — donne ce code à tes amis" % Net.room
 	return "Salle « %s » — %d cartes occupées" % [Net.room, Net.active_count()]
 

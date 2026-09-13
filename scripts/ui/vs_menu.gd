@@ -16,6 +16,7 @@ var _target_label: Label
 var _target_edit: LineEdit
 var _create_button: Button
 var _join_button: Button
+var _quick_button: Button
 var _status: Label
 
 
@@ -88,6 +89,13 @@ func _build() -> void:
 	_join_button = UiStyle.button(buttons, "REJOINDRE", _on_join_pressed,
 		Vector2(190, 56), 19)
 
+	# The relay is a message switch with no directory, so there is no list of open
+	# rooms to browse — but there does not need to be one. Everybody who wants a pick-up
+	# game can meet in the same well-known room, which is what this is. It is the only
+	# path that asks nothing of the player: no code to read out, nobody to invite.
+	_quick_button = UiStyle.button(column, "PARTIE RAPIDE  ·  SALON COMMUN",
+		_on_quick_pressed, Vector2(452, 54), 19)
+
 	_status = UiStyle.note(column, "")
 
 	var back_row := HBoxContainer.new()
@@ -115,6 +123,9 @@ func _sync_transport_ui() -> void:
 	_target_label.text = "SALON" if online else "ADRESSE"
 	_create_button.text = "CRÉER UNE PARTIE" if online else "HÉBERGER"
 	_join_button.text = "REJOINDRE" if online else "REJOINDRE CETTE ADRESSE"
+	# Quick match is a relay-only idea: a LAN match has no shared room to meet in, so
+	# there it would be a button that lies about what it does.
+	_quick_button.visible = online
 	if online:
 		# Left empty on purpose: creating with no code picks a fresh one, so nobody
 		# lands by accident in a room somebody else opened and then abandoned.
@@ -129,8 +140,9 @@ func _sync_transport_ui() -> void:
 
 func _update_status() -> void:
 	if Net.is_online_mode():
-		_status.text = ("Crée une partie et donne le code à tes amis ;\n"
-			+ "ou saisis le code qu'on t'a donné pour rejoindre la leur.")
+		_status.text = ("PARTIE RAPIDE te met dans le salon commun, avec tous ceux qui "
+			+ "l'ont cliquée.\nSinon crée une partie et donne le code, ou saisis un code "
+			+ "pour rejoindre.")
 	else:
 		_status.text = "Héberge sur le port %d, ou rejoins l'adresse de l'hôte.\nPare-feu : autorise Godot au premier hébergement." % Net.port
 
@@ -157,6 +169,16 @@ func _on_join_pressed() -> void:
 		_status.text = "Saisis le code de la partie à rejoindre."
 		return
 	Net.join_match(_target_edit.text)
+	get_tree().change_scene_to_file(WAITING_SCENE)
+
+
+## The common room, so two players who both picked "quick match" meet without either
+## having to pass a code around. The relay routes by room name and knows nothing about
+## who is waiting, so the meeting point has to be agreed in advance — this constant is
+## that agreement. Private matches still work exactly as before through the field above.
+func _on_quick_pressed() -> void:
+	_target_edit.text = Net.DEFAULT_ROOM
+	Net.join_match(Net.DEFAULT_ROOM)
 	get_tree().change_scene_to_file(WAITING_SCENE)
 
 
