@@ -65,6 +65,11 @@ script = ExtResource("1_hextile")
 
 [node name="BaseMesh" type="MeshInstance3D" parent="."]
 mesh = SubResource("CylinderMesh_base")
+; The hex face is flat and sits at y=0 with every other tile, so it casts no shadow
+; any player could read — but each one still costs a draw call in the shadow pass.
+; On a 91-tile board that pass was 42% of all geometry. Buildings keep theirs: they
+; are what actually sells depth.
+cast_shadow = 0
 
 [node name="FortressModel" parent="." instance=ExtResource("2_fortress")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.15, 0)
@@ -79,6 +84,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.15, 0)
 visible = false
 material_override = SubResource("StandardMaterial3D_mine")
 mesh = SubResource("CylinderMesh_mine")
+cast_shadow = 0
 
 [node name="HealthBar" type="Node3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
@@ -97,6 +103,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.17, 0)
 visible = false
 material_override = SubResource("StandardMaterial3D_ring")
 mesh = SubResource("TorusMesh_ring")
+cast_shadow = 0
 
 [node name="LabelCount" type="Label3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)

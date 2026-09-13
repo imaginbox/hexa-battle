@@ -5,7 +5,11 @@ extends CanvasLayer
 ## Group the [GameGrid] node is in.
 const GRID_GROUP := "battle_grid"
 ## How often the tallies and the economy readout are refreshed, in seconds.
-const REFRESH_INTERVAL := 0.25
+##
+## Four times a second was costing a full walk of the board — 91 tiles at the largest
+## table — for a line that only ever changes when troops are produced, which is once a
+## second per tile at most. Twice a second still reads as live and halves the work.
+const REFRESH_INTERVAL := 0.5
 ## Separator between the per-seat blocks on the status line.
 const FACTION_GAP := "     "
 ## Status-line font size by table size. The line gains a block per seat, so it

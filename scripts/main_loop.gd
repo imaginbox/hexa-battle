@@ -73,9 +73,24 @@ var _banner_label: Label
 func _ready() -> void:
 	grid.boss_battle_triggered.connect(_on_boss_battle_triggered)
 	grid.castle_fell.connect(_on_castle_fell)
+	_adapt_shadows_to_platform()
 	_build_ai_commanders()
 	frame_board()
 	_begin_level_stats()
+
+
+## Drops real-time shadows on the board in a browser build.
+##
+## The web export runs on WebGL through the GL Compatibility renderer, where a shadow
+## pass is disproportionately expensive — every caster is drawn a second time, and the
+## browser is already the slowest target the game has. The board is a flat plane of
+## tiles seen from a fixed high angle, so the shadows it loses are the shallow ones
+## around the buildings, not anything the player navigates by. Desktop keeps them.
+func _adapt_shadows_to_platform() -> void:
+	if not OS.has_feature("web"):
+		return
+	for found in find_children("*", "DirectionalLight3D", true, false):
+		(found as DirectionalLight3D).shadow_enabled = false
 
 
 ## Gives every AI card its own commander. A controller plays exactly one seat, so a
