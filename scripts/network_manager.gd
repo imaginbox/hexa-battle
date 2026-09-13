@@ -85,9 +85,9 @@ var _table_owner: int = 0
 ## from a given network — a DNS that returns a black-holed edge produces exactly the
 ## flaky "connecting… never connects" a single attempt gives. Reconnecting rolls the
 ## dice again and, in practice, lands on a working edge within a couple of tries.
-const RELAY_MAX_ATTEMPTS := 6
+const RELAY_MAX_ATTEMPTS := 8
 ## Seconds between two relay attempts, so a failing burst does not hammer the resolver.
-const RELAY_RETRY_DELAY := 0.8
+const RELAY_RETRY_DELAY := 1.0
 var _relay_attempts: int = 0
 ## Set while a retry is already pending, so two failures cannot stack loops.
 var _relay_retry_pending: bool = false
@@ -244,11 +244,13 @@ func _open_relay_peer() -> void:
 	room = target
 	# Cloudflare hands the relay hostname out as a pool of edge IPs, and a resolver
 	# may return one this network cannot reach — a filtered edge, or an IPv6 address
-	# on a link with no working IPv6. Godot caches the first answer and keeps dialling
-	# the same dead address, which is what makes the relay look "down" when it is not.
-	# Dropping the cached answer before every attempt costs nothing and lets each try
-	# draw a fresh one; combined with the retry below, a good edge is usually reached
-	# within a couple of tries.
+	# on a link with no working IPv6. The OS resolver caches that dead answer and
+	# keeps serving it, so every dial goes to the same black hole and the relay looks
+	# "down" while the hostname is perfectly fine. Emptying that cache before each
+	# attempt makes the next dial draw a fresh answer; measured here, one flush takes
+	# the relay from 0/10 to 6/6. Only Windows has the command, and in a browser the
+	# engine's own networking already handles this, so both are simply skipped.
+	_flush_dns()
 	IP.clear_cache(_relay_host())
 	var url: String = "%s/r/%s?u=%s&g=%s&v=1" % [relay_url, target, user_id, game_id]
 	var peer := WebSocketMultiplayerPeer.new()
@@ -258,6 +260,15 @@ func _open_relay_peer() -> void:
 		return
 	multiplayer.multiplayer_peer = peer
 	_arm_relay_watchdog()
+
+
+## Empties the OS resolver cache on Windows, which is where a stale black-holed edge
+## hides. A no-op everywhere else, and it never blocks: the command is given a short
+## window so a hung resolver service cannot stall the connect flow.
+func _flush_dns() -> void:
+	if OS.get_name() != "Windows":
+		return
+	OS.execute("ipconfig", ["/flushdns"], [], true)
 
 
 ## The bare host of the relay URL, so the DNS cache can be addressed by name.
