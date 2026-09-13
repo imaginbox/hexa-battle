@@ -54,6 +54,9 @@ jobs:
 
       - name: Export the web build
         run: |
+          # build/ is gitignored, so the runner starts without it and Godot refuses
+          # to write into a folder that does not exist rather than creating it.
+          mkdir -p build/web
           godot --headless --path . --export-release "Web" build/web/index.html
           # Belt and braces: if Pages ever serves this through Jekyll, a leading
           # underscore in any filename would be swallowed.
