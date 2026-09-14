@@ -733,8 +733,10 @@ func _apply_slots(new_slots: Array) -> void:
 
 func _broadcast_table() -> void:
 	# The owner is the only writer, so its own copy is already correct and rpc()
-	# only has to cover everybody else.
-	_table_received.rpc(slots)
+	# only has to cover everybody else. The public flag rides along: a joiner never
+	# created the room, so it has no other way to learn that the room it entered is a
+	# public one and should not be shown a code.
+	_table_received.rpc(slots, public_room)
 	seats_changed.emit()
 
 
@@ -742,7 +744,7 @@ func _broadcast_table() -> void:
 ## using `@rpc("authority")` because the owner is peer 1 on ENet but an elected peer
 ## on the relay, where peer 1 is a phantom that never runs this code.
 @rpc("any_peer", "reliable")
-func _table_received(new_slots: Array) -> void:
+func _table_received(new_slots: Array, is_public: bool) -> void:
 	var sender: int = multiplayer.get_remote_sender_id()
 	# Trust any sender below our current owner. The owner is by definition the lowest
 	# real peer, so a table arriving from lower down means we had the wrong one — which
@@ -754,6 +756,9 @@ func _table_received(new_slots: Array) -> void:
 		_table_owner = sender
 	if sender != _table_owner:
 		return
+	# The owner's word on the room's visibility, so a joiner shows the same thing the
+	# host does instead of guessing from its own (false) default.
+	public_room = is_public
 	_apply_slots(new_slots)
 	seats_changed.emit()
 
