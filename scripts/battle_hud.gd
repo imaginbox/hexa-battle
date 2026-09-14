@@ -40,9 +40,12 @@ const ART := {
 
 ## Side of one hexagonal cell in pixels.
 const CELL := 72.0
-## Height of the one-line caption above the cells, and the width it is allowed to need.
+## Height of the one-line caption above the cells. It is centred over the cluster and is
+## allowed to overflow it, so its own width never widens the box.
 const TITLE_HEIGHT := 30.0
-const TITLE_WIDTH := 430.0
+## Pixels left between the unit and the first ring of choices. Near zero tucks them right
+## up against the tile's edge.
+const MENU_GAP := 2.0
 
 @onready var _status: Label = $Status
 
@@ -59,6 +62,9 @@ var _art: Dictionary = {}
 var _cluster_title: Label
 var _cluster_catcher: ColorRect
 var _cluster_cells: Array[Control] = []
+## Where the unit itself sits inside the cluster. The choices are laid out around this
+## point, so it is the one that has to land on the tile.
+var _cluster_anchor: Vector2 = Vector2.ZERO
 ## Tile the cluster is currently offering choices for.
 var _context_tile: HexTile
 
@@ -282,7 +288,7 @@ func _rebuild_context_actions() -> void:
 		GameState.player_gold >= GameGrid.RENFORT_COST and tile.troop_count < tile.max_troops)
 	_add_cell(_tex("close"), null, "", _close_context, true)
 
-	_layout_cells()
+	_layout_cells(tile)
 	_place_cluster(tile)
 	_cluster_catcher.visible = true
 	_cluster.visible = true
@@ -375,47 +381,77 @@ func _nudge(cell: Control, factor: float) -> void:
 	tween.tween_property(cell, "scale", Vector2.ONE * factor, 0.1)
 
 
-## Lays the cells out as a ring around the unit that was clicked, rather than as a grid
-## beside it: the choices are about that tile, so they surround it.
+## Lays the choices out as an arc hugging the unit's lower side, rather than a ring all the
+## way round: they read as a fan of answers under the tile they are about.
 ##
-## The radius grows with the number of choices so they never touch, and is never smaller
-## than a cell and a quarter, so the ring always reads as being *around* the unit rather
-## than on top of it.
-func _layout_cells() -> void:
+## The radius is measured from the unit as it actually appears on screen, so the arc stays
+## snug at every board size. A fixed pixel radius would only ever fit the smallest board —
+## a four-player map is drawn from much further back and its tiles are far smaller, so the
+## choices would float well clear of the one they belong to.
+##
+## The step is then chosen so neighbouring cells all but touch, the chord between two of
+## them being the cell's own width. That is what turns a row of buttons into a curve.
+func _layout_cells(tile: HexTile) -> void:
 	var count: int = _cluster_cells.size()
 	if count == 0:
 		return
-	var ring: float = maxf(CELL * 1.25, CELL * 0.21 * float(count))
-	var span: float = (ring + CELL) * 2.0
-	# The caption is wider than the ring at small tables, so the cluster is as wide as the
-	# wider of the two and the ring is centred underneath it.
-	var width: float = maxf(span, TITLE_WIDTH)
-	_cluster.size = Vector2(width, TITLE_HEIGHT + span)
-	_cluster_title.position = Vector2.ZERO
-	_cluster_title.size = Vector2(width, TITLE_HEIGHT)
-	var centre: Vector2 = Vector2(width * 0.5, TITLE_HEIGHT + span * 0.5)
+	var radius: float = CELL
+	var camera: Camera3D = get_viewport().get_camera_3d()
+	if camera != null and is_instance_valid(tile):
+		var here: Vector2 = camera.unproject_position(tile.global_position)
+		var edge: Vector2 = camera.unproject_position(
+			tile.global_position + Vector3(tile.scale.x, 0.0, 0.0))
+		# One local unit measured on screen is the tile's circumradius there; the tile's flat
+		# side sits at sqrt(3)/2 of that, and that edge is what the choices have to clear.
+		radius = (edge - here).length() * 0.866 + CELL * 0.5 + MENU_GAP
+	var step: float = 2.0 * asin(clampf(CELL / (2.0 * radius), 0.0, 1.0))
+	var span: float = step * float(count - 1)
+	# Positions are built around the origin and only afterwards moved into the cluster,
+	# because an arc is not symmetric: its box has to be measured rather than assumed.
+	var offsets: Array[Vector2] = []
+	# Started at zero so the origin — the unit itself — is part of the box too, which is what
+	# puts the caption directly above the tile instead of on top of the arc.
+	var left: float = 0.0
+	var right: float = 0.0
+	var top: float = 0.0
+	var bottom: float = 0.0
 	for i in count:
-		# Starting at the top and stepping by a whole turn divided evenly, so the ring is
-		# the same shape whatever the number of choices.
-		var angle: float = -PI * 0.5 + TAU * float(i) / float(count)
-		_cluster_cells[i].position = centre + Vector2(cos(angle), sin(angle)) * ring \
-			- Vector2(CELL, CELL) * 0.5
+		# Straight down on screen is a quarter turn, and the arc spreads evenly either side.
+		var angle: float = PI * 0.5 - span * 0.5 + step * float(i)
+		var offset: Vector2 = Vector2(cos(angle), sin(angle)) * radius
+		offsets.append(offset)
+		left = minf(left, offset.x)
+		right = maxf(right, offset.x)
+		top = minf(top, offset.y)
+		bottom = maxf(bottom, offset.y)
+	left -= CELL * 0.5
+	right += CELL * 0.5
+	top -= CELL * 0.5
+	bottom += CELL * 0.5
+	var width: float = right - left
+	_cluster.size = Vector2(width, TITLE_HEIGHT + (bottom - top))
+	_cluster_title.position = Vector2.ZERO
+	# The caption is allowed to spill out of the box rather than widen it: a box as wide as
+	# the caption gets pushed off the unit whenever the tile sits near an edge, and it is the
+	# arc, not the caption, that has to stay on the tile.
+	_cluster_title.size = Vector2(width, TITLE_HEIGHT)
+	# Where the unit lands inside the cluster: the origin the offsets were built around, moved
+	# into the box. Everything else is placed relative to it.
+	_cluster_anchor = Vector2(width * 0.5 - (left + right) * 0.5, TITLE_HEIGHT - top)
+	for i in count:
+		_cluster_cells[i].position = offsets[i] + _cluster_anchor - Vector2(CELL, CELL) * 0.5
 
 
-## Puts the ring on the unit it belongs to, and clamps the whole thing inside the screen:
+## Puts the cluster on the unit it belongs to, and clamps the whole thing inside the screen:
 ## a menu hanging off the edge is worse than one slightly out of place.
 func _place_cluster(tile: HexTile) -> void:
 	var view: Vector2 = get_viewport().get_visible_rect().size
 	var wanted: Vector2 = (view - _cluster.size) * 0.5
 	var camera: Camera3D = get_viewport().get_camera_3d()
 	if camera != null and is_instance_valid(tile):
-		var screen: Vector2 = camera.unproject_position(tile.global_position)
-		# It is the ring that has to sit on the unit, not the whole cluster: the caption
-		# strip lives above it, so the cluster is offset by half that strip to keep the ring
-		# itself centred on the tile.
-		var ring_centre: Vector2 = Vector2(_cluster.size.x * 0.5,
-			TITLE_HEIGHT + (_cluster.size.y - TITLE_HEIGHT) * 0.5)
-		wanted = screen - ring_centre
+		# The anchor is where the unit sits inside the cluster, so that is the point that has
+		# to land on the tile — not the cluster's centre.
+		wanted = camera.unproject_position(tile.global_position) - _cluster_anchor
 	wanted.x = clampf(wanted.x, 12.0, maxf(12.0, view.x - _cluster.size.x - 12.0))
 	wanted.y = clampf(wanted.y, 12.0, maxf(12.0, view.y - _cluster.size.y - 12.0))
 	_cluster.position = wanted
