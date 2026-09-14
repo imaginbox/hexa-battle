@@ -38,13 +38,11 @@ const ART := {
 	"soldier": "res://Assets/generated/icon_unit_soldier.png",
 }
 
-## Side of one hexagonal cell in pixels, and the gap left between two.
-const CELL := 92.0
-const CELL_GAP := 6.0
-## How many cells fit on a row before the honeycomb starts another.
-const CELLS_PER_ROW := 3
-## Height of the one-line caption above the cells.
+## Side of one hexagonal cell in pixels.
+const CELL := 72.0
+## Height of the one-line caption above the cells, and the width it is allowed to need.
 const TITLE_HEIGHT := 30.0
+const TITLE_WIDTH := 430.0
 
 @onready var _status: Label = $Status
 
@@ -189,7 +187,10 @@ func _build_context_panel() -> void:
 	# a cell lands here — which is what makes "click anywhere else and it goes away" work
 	# without the board underneath reading that same click as a new selection.
 	_cluster_catcher = ColorRect.new()
-	_cluster_catcher.color = Color(0, 0, 0, 0)
+	# Dimmed rather than invisible: the choices belong to the unit behind them, and a menu
+	# floating over an undimmed board reads as part of the board rather than as a question
+	# being asked about it.
+	_cluster_catcher.color = Color(0.06, 0.08, 0.11, 0.45)
 	_cluster_catcher.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_cluster_catcher.mouse_filter = Control.MOUSE_FILTER_STOP
 	_cluster_catcher.gui_input.connect(_on_cluster_catcher_input)
@@ -355,14 +356,14 @@ func _add_cell(icon: Texture2D, price_icon: Texture2D, price: String,
 	if price_icon != null:
 		var chip := TextureRect.new()
 		chip.texture = price_icon
-		chip.custom_minimum_size = Vector2(20, 20)
+		chip.custom_minimum_size = Vector2(CELL * 0.28, CELL * 0.28)
 		chip.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		chip.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		row.add_child(chip)
 	var label := Label.new()
 	label.text = price
-	label.add_theme_font_size_override("font_size", 17)
+	label.add_theme_font_size_override("font_size", int(CELL * 0.24))
 	label.add_theme_color_override("font_color", COLOR_INK)
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(label)
@@ -374,35 +375,47 @@ func _nudge(cell: Control, factor: float) -> void:
 	tween.tween_property(cell, "scale", Vector2.ONE * factor, 0.1)
 
 
-## Lays the cells out as a honeycomb: rows of [constant CELLS_PER_ROW], every other row
-## pushed along by half a cell so the hexagons nest. That nesting is what makes the
-## cluster read as one shape rather than as a list.
+## Lays the cells out as a ring around the unit that was clicked, rather than as a grid
+## beside it: the choices are about that tile, so they surround it.
+##
+## The radius grows with the number of choices so they never touch, and is never smaller
+## than a cell and a quarter, so the ring always reads as being *around* the unit rather
+## than on top of it.
 func _layout_cells() -> void:
-	var step: float = CELL + CELL_GAP
-	var rows: int = int(ceil(float(_cluster_cells.size()) / float(CELLS_PER_ROW)))
-	var width: float = step * CELLS_PER_ROW - CELL_GAP
-	if rows > 1:
-		width += step * 0.5
-	_cluster.size = Vector2(width, TITLE_HEIGHT + step * rows - CELL_GAP)
+	var count: int = _cluster_cells.size()
+	if count == 0:
+		return
+	var ring: float = maxf(CELL * 1.25, CELL * 0.21 * float(count))
+	var span: float = (ring + CELL) * 2.0
+	# The caption is wider than the ring at small tables, so the cluster is as wide as the
+	# wider of the two and the ring is centred underneath it.
+	var width: float = maxf(span, TITLE_WIDTH)
+	_cluster.size = Vector2(width, TITLE_HEIGHT + span)
 	_cluster_title.position = Vector2.ZERO
 	_cluster_title.size = Vector2(width, TITLE_HEIGHT)
-	for i in _cluster_cells.size():
-		var row: int = i / CELLS_PER_ROW
-		var column: int = i % CELLS_PER_ROW
-		var stagger: float = (step * 0.5) if row % 2 == 1 else 0.0
-		_cluster_cells[i].position = Vector2(
-			column * step + stagger, TITLE_HEIGHT + row * step)
+	var centre: Vector2 = Vector2(width * 0.5, TITLE_HEIGHT + span * 0.5)
+	for i in count:
+		# Starting at the top and stepping by a whole turn divided evenly, so the ring is
+		# the same shape whatever the number of choices.
+		var angle: float = -PI * 0.5 + TAU * float(i) / float(count)
+		_cluster_cells[i].position = centre + Vector2(cos(angle), sin(angle)) * ring \
+			- Vector2(CELL, CELL) * 0.5
 
 
-## Puts the cluster beside the tile it belongs to, and clamps it inside the screen: a
-## menu hanging off the edge is worse than one slightly out of place.
+## Puts the ring on the unit it belongs to, and clamps the whole thing inside the screen:
+## a menu hanging off the edge is worse than one slightly out of place.
 func _place_cluster(tile: HexTile) -> void:
 	var view: Vector2 = get_viewport().get_visible_rect().size
 	var wanted: Vector2 = (view - _cluster.size) * 0.5
 	var camera: Camera3D = get_viewport().get_camera_3d()
 	if camera != null and is_instance_valid(tile):
 		var screen: Vector2 = camera.unproject_position(tile.global_position)
-		wanted = screen + Vector2(CELL * 0.8, -_cluster.size.y * 0.5)
+		# It is the ring that has to sit on the unit, not the whole cluster: the caption
+		# strip lives above it, so the cluster is offset by half that strip to keep the ring
+		# itself centred on the tile.
+		var ring_centre: Vector2 = Vector2(_cluster.size.x * 0.5,
+			TITLE_HEIGHT + (_cluster.size.y - TITLE_HEIGHT) * 0.5)
+		wanted = screen - ring_centre
 	wanted.x = clampf(wanted.x, 12.0, maxf(12.0, view.x - _cluster.size.x - 12.0))
 	wanted.y = clampf(wanted.y, 12.0, maxf(12.0, view.y - _cluster.size.y - 12.0))
 	_cluster.position = wanted
