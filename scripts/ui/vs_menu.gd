@@ -51,9 +51,10 @@ func _build() -> void:
 	var card := PanelContainer.new()
 	card.set_anchors_preset(Control.PRESET_CENTER)
 	card.offset_left = -430.0
-	card.offset_top = -300.0
+	# Clears the title band (it runs to y≈92), so the card never sits under it.
+	card.offset_top = -252.0
 	card.offset_right = 430.0
-	card.offset_bottom = 250.0
+	card.offset_bottom = 258.0
 	card.add_theme_stylebox_override("panel", UiStyle.card_style())
 	add_child(card)
 
