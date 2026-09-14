@@ -53,17 +53,35 @@ var _sync_done: bool = false
 var _hold: float = 0.0
 var _sync_quit_at: float = 0.0
 
+## Set by HEXA_WIN_TEST: once the boards are compared, the host takes the last enemy
+## keep so the match has to be ruled on, and both peers report the winner they were told.
+var _win_test: bool = false
+var _took_keep: bool = false
+var _reported_win: bool = false
+var _winner: int = -99
+## When the round started, as this peer saw it. Negative until it does.
+var _round_at: float = -1.0
+
 
 ## How long to wait before starting the round, so the joiner is seated first.
 const AUTO_START_AT := 4.0
-## How long after the board is up the host plays, and how long after that both peers
-## report. The gap has to cover a network round-trip plus the pawn's flight.
-const SYNC_ACT_AFTER := 2.0
-const SYNC_CHECK_AFTER := 6.0
+## When each phase runs, in seconds after the round starts. Anchoring on the round rather
+## than on each peer's own report time is what makes the test honest at three and four
+## players: a staggered anchor would compare boards taken at four different moments,
+## which looks exactly like a desync and is not one.
+const ACT_AFTER := 6.0
+const CHECK_AFTER := 12.0
+const TAKE_AFTER := 16.0
+const WIN_REPORT_AFTER := 19.0
+const QUIT_AFTER := 26.0
 
 
 func _on_game_started() -> void:
 	print("[probe] t=%5.1f  game_started -> the round is on" % _elapsed)
+	# The shared clock for every phase below. Every peer learns the round started within
+	# a round-trip of every other, so this is the one instant the whole table can agree on.
+	if _round_at < 0.0:
+		_round_at = _elapsed
 
 
 func _ready() -> void:
@@ -74,6 +92,7 @@ func _ready() -> void:
 	Net.seats_changed.connect(_on_seats_changed)
 	Net.game_started.connect(_on_game_started)
 	Net.chat_line.connect(_on_chat)
+	Net.match_decided.connect(_on_match_decided)
 
 	if OS.get_environment("HEXA_TRANSPORT") == "enet":
 		Net.select_local_mode()
@@ -105,6 +124,8 @@ func _ready() -> void:
 	var hold: String = OS.get_environment("HEXA_HOLD")
 	if hold.is_valid_float():
 		_hold = hold.to_float()
+	if OS.get_environment("HEXA_WIN_TEST") == "1":
+		_win_test = true
 
 
 func _on_failed(reason: String) -> void:
@@ -173,16 +194,28 @@ func _process(delta: float) -> void:
 	# that disagree mean the action never travelled, or the boards drifted apart.
 	if not _sync_test:
 		return
-	if not _sync_done:
-		if Net.is_host() and not _acted and _elapsed >= _reported_at + SYNC_ACT_AFTER:
-			_acted = true
-			_play_sync_action()
-		if _elapsed >= _reported_at + SYNC_CHECK_AFTER:
-			_sync_done = true
-			_sync_quit_at = _elapsed + _hold
-			print("[probe] t=%5.1f  EMPREINTE APRÈS  %s" % [_elapsed, _fingerprint()])
-		return
-	if _hold <= 0.0 or _elapsed >= _sync_quit_at:
+	# Anchored on the round, which the whole table agrees on (see _on_game_started).
+	var anchor: float = _round_at if _round_at >= 0.0 else _reported_at
+	# Every peer acts, not just the host: the host->client direction was the easy one,
+	# and the client->host one — an intent travelling to the owner and coming back as a
+	# broadcast — is the one nothing else exercises.
+	if not _acted and _elapsed >= anchor + ACT_AFTER:
+		_acted = true
+		_play_sync_action()
+	if not _sync_done and _elapsed >= anchor + CHECK_AFTER:
+		_sync_done = true
+		print("[probe] t=%5.1f  EMPREINTE APRÈS  %s" % [_elapsed, _fingerprint()])
+	# The keeps come down only after everyone has compared, so the take cannot be part of
+	# what the comparison measured.
+	if _win_test and Net.is_host() and not _took_keep and _elapsed >= anchor + TAKE_AFTER:
+		_took_keep = true
+		_take_last_keep()
+	if _win_test and not _reported_win and _elapsed >= anchor + WIN_REPORT_AFTER:
+		_reported_win = true
+		print("[probe] t=%5.1f  RÉSULTAT  vainqueur annoncé = %s" % [
+			_elapsed, "siège %d" % _winner if _winner >= 0 else "aucun"])
+	var quit_at: float = QUIT_AFTER if _win_test else CHECK_AFTER + 2.0
+	if _elapsed >= anchor + quit_at:
 		get_tree().quit()
 
 
@@ -208,6 +241,32 @@ func _play_sync_action() -> void:
 	print("[probe] t=%5.1f  ACTION  %s -> %s" % [
 		_elapsed, str(from.grid_coords), str(targets[0].grid_coords)])
 	_board_grid.execute_march(from, targets[0])
+
+
+## Takes every rival keep through the game's own storm-the-castle resolution, so the
+## falls are real ones and the match genuinely has to be ruled on afterwards — rather
+## than the test announcing a winner that nothing decided. All of them, so the same test
+## means something at a duel and at a full table: the match should only be ruled on once
+## a single keep is left, whatever size it is played at.
+func _take_last_keep() -> void:
+	if _board_grid == null:
+		return
+	var keeps: Array[HexTile] = []
+	for coord in _board_grid.tiles:
+		var tile: HexTile = _board_grid.tiles[coord]
+		if tile.tile_type == HexTile.TileType.FORTRESS_BOSS \
+				and tile.owner_seat != GameState.local_seat:
+			keeps.append(tile)
+	if keeps.is_empty():
+		print("[probe] aucun château ennemi à prendre")
+		return
+	for keep: HexTile in keeps:
+		print("[probe] t=%5.1f  CHÂTEAU PRIS  %s" % [_elapsed, str(keep.grid_coords)])
+		_board_grid.resolve_regular_clash(keep, GameState.local_seat, 99999)
+
+
+func _on_match_decided(winner: int) -> void:
+	_winner = winner
 
 
 ## A fingerprint of the board, so two peers can be compared at a glance: per-card tile

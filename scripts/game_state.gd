@@ -93,6 +93,25 @@ static func configure_table(occupied: Array[int], ai: Array[int], my_seat: int,
 	table_radius = radius_for_players(occupied.size())
 
 
+## Peer id that owns the table, and whether that is this peer.
+##
+## Published with the rest of the table, and for exactly the same reason it lives here:
+## the board carries a `class_name`, so it can be compiled as a dependency of another
+## script before the autoload singletons are registered — at which point a `Net`
+## reference does not resolve and takes the whole file down with it. Static data has no
+## such ordering hazard.
+static var table_owner_id: int = 0
+static var is_authority: bool = false
+## Peer id -> seat index, so an action arriving off the wire can be traced to whoever
+## sent it rather than trusted.
+static var peer_seats: Dictionary = {}
+
+
+## The seat a peer holds, or -1 when it holds none.
+static func seat_of_peer(peer_id: int) -> int:
+	return int(peer_seats.get(peer_id, -1))
+
+
 static func add_gold(amount: int) -> void:
 	if amount <= 0:
 		return

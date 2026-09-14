@@ -135,6 +135,10 @@ var _board_ready_peers: Dictionary = {}
 ## Set while an action that came off the wire is being applied, so the guarded public
 ## methods do not try to forward it back to the owner it just came from.
 var _applying_remote: bool = false
+## Set when this player is out of the match — eliminated, or the match already ruled on.
+## Their clicks do nothing after that: an eliminated player may still be holding tiles
+## elsewhere on the board, and being out has to mean out.
+var input_locked: bool = false
 
 
 func _ready() -> void:
@@ -144,8 +148,8 @@ func _ready() -> void:
 	# freshly generated board until the next one — and a broadcast that arrived during
 	# the gap was aimed at a node that did not exist yet, which Godot answers with a
 	# "node not found" and drops. The request makes that window impossible.
-	if GameState.in_room and not Net.is_host():
-		var owner_id: int = Net.table_owner()
+	if GameState.in_room and not GameState.is_authority:
+		var owner_id: int = GameState.table_owner_id
 		if owner_id > 0:
 			_request_snapshot.rpc_id(owner_id)
 
@@ -376,6 +380,8 @@ func board_radius() -> float:
 
 
 func _on_tile_input(_camera: Camera3D, event: InputEvent, _pos: Vector3, _normal: Vector3, _shape_idx: int, tile: HexTile) -> void:
+	if input_locked:
+		return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.is_pressed():
 			# A tile down to its last troop has nothing to send, so it cannot
@@ -492,7 +498,7 @@ func recruit(tile: HexTile, type: HexTile.UnitType) -> bool:
 
 
 func _apply_recruit(tile: HexTile, type: int) -> void:
-	tile.unit_type = type
+	tile.unit_type = type as HexTile.UnitType
 	# Without this the badge and the label keep showing the old class: the recruit
 	# works, but nothing on the board would say so.
 	tile.update_visuals()
@@ -669,7 +675,12 @@ func _launch_piece(from: HexTile, to: HexTile, side: int, relative_size: float,
 		piece.position = start.bezier_interpolate(mid, mid, end, t)
 		, 0.0, 1.0, duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tween.tween_callback(func() -> void:
-		on_impact.call()
+		# A shot can still be in the air when the board is rebuilt — the level loop does
+		# exactly that the moment a keep falls, and it frees every tile on the way. A
+		# piece landing on a tile that no longer exists is not an error; it is a shot
+		# into a board that has moved on, so it is dropped.
+		if is_instance_valid(from) and is_instance_valid(to):
+			on_impact.call()
 		piece.queue_free()
 	)
 
@@ -751,11 +762,10 @@ func apply_snapshot(data: PackedInt32Array) -> void:
 			# count, so only a class or building change needs the extra pass.
 			var look_changed: bool = tile.tile_type != data[i + 4] \
 				or tile.unit_type != data[i + 5]
-			var owner_changed: bool = tile.owner_seat != data[i + 2]
 			tile.owner_seat = data[i + 2]
 			tile.troop_count = data[i + 3]
-			tile.tile_type = data[i + 4]
-			tile.unit_type = data[i + 5]
+			tile.tile_type = data[i + 4] as HexTile.TileType
+			tile.unit_type = data[i + 5] as HexTile.UnitType
 			tile.mine_level = maxi(data[i + 7], 1)
 			# The rate is derived, not stored: a peer that only ever saw the tier in a
 			# snapshot must still pay the right gold for it.
@@ -776,7 +786,7 @@ func apply_snapshot(data: PackedInt32Array) -> void:
 ## so there is nothing to apply on this side. Only peers that have announced their
 ## board are addressed, so a late joiner is not sent one before its node exists.
 func _run_board_sync(delta: float) -> void:
-	if not GameState.in_room or not Net.is_host():
+	if not GameState.in_room or not GameState.is_authority:
 		return
 	_sync_left -= delta
 	if _sync_left > 0.0:
@@ -791,7 +801,7 @@ func _run_board_sync(delta: float) -> void:
 
 @rpc("any_peer", "reliable")
 func _board_received(data: PackedInt32Array) -> void:
-	if Net.is_host():
+	if GameState.is_authority:
 		return
 	apply_snapshot(data)
 
@@ -800,7 +810,7 @@ func _board_received(data: PackedInt32Array) -> void:
 ## it as a subscriber. Answered only by the owner, whatever the request claims.
 @rpc("any_peer", "reliable")
 func _request_snapshot() -> void:
-	if not Net.is_host():
+	if not GameState.is_authority:
 		return
 	var peer: int = multiplayer.get_remote_sender_id()
 	_board_ready_peers[peer] = true
@@ -822,12 +832,12 @@ func _route(kind: String, fields: Dictionary) -> bool:
 	var action: Dictionary = fields.duplicate()
 	action["kind"] = kind
 	action["seat"] = GameState.local_seat
-	if Net.is_host():
+	if GameState.is_authority:
 		# The owner decides, and tells the others so their pawns fly at the same moment
 		# its own does.
 		_action_received.rpc(action)
 		return true
-	var owner_id: int = Net.table_owner()
+	var owner_id: int = GameState.table_owner_id
 	if owner_id <= 0:
 		return false # no table to ask yet: the click is dropped rather than applied
 	_action_request.rpc_id(owner_id, action)
@@ -839,9 +849,9 @@ func _route(kind: String, fields: Dictionary) -> bool:
 ## reaches, so it can only ever do what a click could have done.
 @rpc("any_peer", "reliable")
 func _action_request(action: Dictionary) -> void:
-	if not Net.is_host():
+	if not GameState.is_authority:
 		return
-	var seat: int = Net.seat_of_peer(multiplayer.get_remote_sender_id())
+	var seat: int = GameState.seat_of_peer(multiplayer.get_remote_sender_id())
 	if seat < 0:
 		return
 	var kind: String = str(action.get("kind", ""))
@@ -863,7 +873,7 @@ func _action_request(action: Dictionary) -> void:
 ## The owner's copy of an action, run by every other peer.
 @rpc("any_peer", "reliable")
 func _action_received(action: Dictionary) -> void:
-	if Net.is_host():
+	if GameState.is_authority:
 		return
 	_play_action(action)
 

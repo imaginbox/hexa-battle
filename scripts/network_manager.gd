@@ -34,6 +34,9 @@ signal session_ended
 ## A waiting-room line arrived. `seat` is the speaker's card (-1 if it holds none),
 ## `text` is the line, and `mine` is whether this peer was the one who said it.
 signal chat_line(seat: int, text: String, mine: bool)
+## The match has been ruled on. `winner` is the seat that took it, or -1 when it ended
+## with nobody left standing.
+signal match_decided(winner: int)
 
 ## Which of the two transports a match runs over.
 enum Transport { RELAY, ENET }
@@ -170,9 +173,28 @@ func _heartbeat() -> void:
 	_known_peers[sender] = true
 
 
+## Whether the table may still change. Once a round is under way it may not.
+##
+## The board on every screen was built from the seats the table had at that moment, and
+## a seat index is what decides which castle is yours, which tiles you may click and
+## which corner you fly. Re-seating anybody under a board that is already standing moves
+## a player's seat without moving the castle they are looking at — so the honest thing
+## is to freeze the table for the duration of the match.
+##
+## The cost is deliberate: a host that genuinely leaves mid-match no longer hands the
+## table over, so the survivors keep the last board the owner published. That is worse
+## for a host that really vanished and much better for the far more common case — a
+## player whose browser tab went to the background, which freezes its frame loop and
+## therefore its heartbeats, and who would otherwise come back to a seat that had moved
+## underneath them.
+func table_frozen() -> bool:
+	return started
+
+
 ## Drops every known peer that has gone quiet for [constant PEER_TIMEOUT_MS]. When the
 ## one that fell silent is the owner, authority is re-elected immediately rather than
-## waiting for a disconnection the relay will never deliver.
+## waiting for a disconnection the relay will never deliver — unless a round is under
+## way, where the table is left exactly as it is (see [method table_frozen]).
 func _prune_silent_peers() -> void:
 	var now: int = Time.get_ticks_msec()
 	var dropped: bool = false
@@ -182,7 +204,7 @@ func _prune_silent_peers() -> void:
 		if now - int(_last_seen[peer]) > PEER_TIMEOUT_MS:
 			_last_seen.erase(peer)
 			dropped = true
-	if not dropped:
+	if not dropped or table_frozen():
 		return
 	_refresh_table_owner(true)
 	if is_host():
@@ -203,8 +225,20 @@ func _prune_silent_peers() -> void:
 func _publish_table() -> void:
 	if not connected:
 		GameState.configure_table([0, 1], [1], 0, false)
+		GameState.table_owner_id = 0
+		GameState.is_authority = false
+		GameState.peer_seats = {}
 		return
 	GameState.configure_table(occupied_seats(), ai_seats(), local_seat(), true)
+	# The board reads these from GameState rather than from here: it carries a
+	# `class_name`, and a Net reference in one of those is a compile-order hazard.
+	GameState.table_owner_id = _table_owner
+	GameState.is_authority = is_host()
+	var seats_of: Dictionary = {}
+	for i in slots.size():
+		if int(slots[i]["kind"]) == SeatKind.HUMAN:
+			seats_of[int(slots[i]["peer"])] = i
+	GameState.peer_seats = seats_of
 
 
 # --- Connexion ----------------------------------------------------------------
@@ -528,6 +562,13 @@ func _on_peer_connected(id: int) -> void:
 	# before deciding whether we are the one to republish. Self is a candidate here:
 	# the connect-burst exclusion above is about a roster that is not yet complete,
 	# not about one that has just grown.
+	#
+	# A newcomer during a round is politely ignored: the board is already built from the
+	# seats it has, and there is no way to seat somebody into a match in progress
+	# without moving everyone else's castle.
+	if table_frozen():
+		seats_changed.emit()
+		return
 	_refresh_table_owner(true)
 	if not is_host():
 		seats_changed.emit()
@@ -544,7 +585,10 @@ func _on_peer_disconnected(id: int) -> void:
 		return
 	# Reactive failover: recompute from the roster, which is now authoritative. If
 	# that makes us the new lowest peer we adopt the table immediately — no timer
-	# and no grace window.
+	# and no grace window — unless a round is under way, where the table is frozen.
+	if table_frozen():
+		seats_changed.emit()
+		return
 	_refresh_table_owner(true)
 	if not is_host():
 		seats_changed.emit()
@@ -621,6 +665,8 @@ func _refresh_table_owner(include_self: bool = true) -> void:
 	# flicker off the real host mid-burst.
 	if candidates.size() > 0:
 		_table_owner = int(candidates[0])
+		# Keep GameState's copy in step: the board reads the authority from there.
+		_publish_table()
 
 
 # --- Sièges --------------------------------------------------------------------
@@ -832,6 +878,24 @@ func toggle_ai(seat: int) -> void:
 		else {"kind": SeatKind.AI, "peer": 0, "ready": true}
 	_broadcast_table()
 	start_game()
+
+
+## Declares the match over. Owner only, and deliberately so: a ruling has to come from
+## one place, or two peers could hand the match to two different people.
+func decide_match(winner: int) -> void:
+	if not is_host():
+		return
+	match_decided.emit(winner)
+	_match_decided.rpc(winner)
+
+
+## The owner's ruling, arriving on the other peers. Guarded by the sender, so a client
+## cannot award itself the match.
+@rpc("any_peer", "reliable")
+func _match_decided(winner: int) -> void:
+	if multiplayer.get_remote_sender_id() != _table_owner:
+		return
+	match_decided.emit(winner)
 
 
 ## Sends a line of chat to everyone in the waiting room.

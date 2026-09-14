@@ -54,9 +54,16 @@ var _continue_layer: CanvasLayer
 var _continue_button: Button
 ## Set when the player's castle falls: the run is over and the board is frozen.
 var _game_over: bool = false
+## Set once a match's outcome has been ruled on, so it is only ever ruled once.
+var _decided: bool = false
+## Set when this player is out of a match that is still going on: the screen says so,
+## but the board keeps running so the rest of the fight can be watched.
+var _eliminated: bool = false
 ## Game over screen, built on the first defeat.
 var _game_over_layer: CanvasLayer
 var _game_over_label: Label
+## Offered only to a player who is out while their match is still going on.
+var _watch_button: Button
 
 ## Where the level's tallies stood when it began, so the recap reports only what
 ## this level produced.
@@ -73,6 +80,9 @@ var _banner_label: Label
 func _ready() -> void:
 	grid.boss_battle_triggered.connect(_on_boss_battle_triggered)
 	grid.castle_fell.connect(_on_castle_fell)
+	Net.match_decided.connect(_on_match_decided)
+	# Only fires while this board exists, so it is always about the match in progress.
+	Net.failed.connect(_on_connection_lost)
 	_adapt_shadows_to_platform()
 	_build_ai_commanders()
 	frame_board()
@@ -138,18 +148,82 @@ func _level_recap() -> String:
 ## your own means the run is over. (The parameter is not called "owner" because
 ## that shadows Node.owner.)
 func _on_castle_fell(lost_by: int) -> void:
-	if _game_over:
+	if _game_over or _decided:
+		return
+	if GameState.in_room:
+		_match_castle_fell(lost_by)
 		return
 	if lost_by == GameState.local_seat:
 		_end_run()
 		return
 	current_boss_target = null
-	if GameState.in_room:
-		# A room has no staged difficulty to climb, and no shared scoreboard yet:
-		# the fall of a rival keep is announced, and that is all it settles.
-		_show_banner("CHÂTEAU J%d PRIS !" % (lost_by + 1))
-		return
 	trigger_stage_clear()
+
+
+## A keep coming down in a match is not the end of anything by itself: it puts one
+## player out, and the match is settled by the last keep still standing. So this only
+## reports, and the ruling is left to the table's owner.
+func _match_castle_fell(lost_by: int) -> void:
+	current_boss_target = null
+	if lost_by == GameState.local_seat:
+		# Out of the running, but the fight goes on without us: the board keeps running
+		# so the rest can be watched, and input is locked so being out means out.
+		_eliminated = true
+		grid.input_locked = true
+		_show_result("ÉLIMINÉ",
+			"Votre château est tombé. La partie continue sans vous.", true)
+	else:
+		_show_banner("CHÂTEAU J%d PRIS !" % (lost_by + 1))
+	_check_match_outcome()
+
+
+## Counts the keeps still standing and, once only one is left, rules on the match.
+## Owner only, because two peers ruling at once could declare two different winners.
+func _check_match_outcome() -> void:
+	if _decided or not Net.is_host():
+		return
+	var standing: Array[int] = []
+	for tile: HexTile in grid.tiles.values():
+		if tile.tile_type != HexTile.TileType.FORTRESS_BOSS:
+			continue
+		if tile.owner_seat != HexTile.NEUTRAL and not standing.has(tile.owner_seat):
+			standing.append(tile.owner_seat)
+	if standing.size() > 1:
+		return
+	_decided = true
+	Net.decide_match(standing[0] if standing.size() == 1 else -1)
+
+
+## The relay dropped us, or the host closed the game.
+##
+## There is no picking this back up: a board is built from the seats the table had when
+## the round started, and a reconnect lands on a fresh peer id — and therefore a
+## different seat — so the castle on this screen would no longer be the one this player
+## owns. Rather than freeze or drift in silence, the match is closed out and said so.
+func _on_connection_lost(reason: String) -> void:
+	if _decided or _game_over:
+		return
+	_decided = true
+	_set_ai_active(false)
+	grid.input_locked = true
+	_show_result("CONNEXION PERDUE", reason)
+
+
+## The owner's ruling, arriving on every screen at once.
+func _on_match_decided(winner: int) -> void:
+	if _decided and not _eliminated:
+		return
+	_decided = true
+	# Nobody is marching anywhere after this, so the machines can stop thinking too and
+	# the board stops taking clicks.
+	_set_ai_active(false)
+	grid.input_locked = true
+	if winner == GameState.local_seat:
+		_show_result("VICTOIRE", "Dernier château debout.")
+	elif winner < 0:
+		_show_result("MATCH NUL", "Plus un seul château debout.")
+	else:
+		_show_result("DÉFAITE", "Le château J%d a tenu jusqu'au bout." % (winner + 1))
 
 
 func _on_boss_battle_triggered(attacker: HexTile, defender: HexTile) -> void:
@@ -343,12 +417,25 @@ func _end_run() -> void:
 
 
 func _show_game_over() -> void:
+	_show_result("DÉFAITE",
+		"Votre château est tombé au niveau %d" % GameState.ai_level)
+
+
+## The card a match ends on, shared by every way it can finish — won, lost, or watched
+## from the sidelines — so they all look the same and all leave the same way.
+## `can_watch` is only true for a player who is out of a match that is still running.
+func _show_result(title: String, subtitle: String, can_watch: bool = false) -> void:
 	if _game_over_layer == null:
 		_build_game_over_ui()
-	_game_over_label.text = "DÉFAITE\nVotre château est tombé"
-	if not GameState.in_room:
-		_game_over_label.text += " au niveau %d" % GameState.ai_level
+	_game_over_label.text = "%s\n%s" % [title, subtitle]
+	_watch_button.visible = can_watch
 	_game_over_layer.visible = true
+
+
+## Puts the card away and leaves the match running, for a player who is out and would
+## rather see how it ends than leave.
+func _watch_match() -> void:
+	_game_over_layer.visible = false
 
 
 ## Leaves a match for good: drops the connection and returns to the front end.
@@ -394,6 +481,18 @@ func _build_game_over_ui() -> void:
 	_style_continue_button(restart)
 	restart.pressed.connect(_leave_to_menu if GameState.in_room else _restart_run)
 	column.add_child(restart)
+
+	# Only ever offered to a player who is out while the match is not: it dismisses the
+	# card so the rest of the fight can be watched, without letting them take part — the
+	# board's input stays locked.
+	_watch_button = Button.new()
+	_watch_button.text = "CONTINUER À REGARDER"
+	_watch_button.custom_minimum_size = Vector2(300, 52)
+	_watch_button.add_theme_font_size_override("font_size", 19)
+	_style_continue_button(_watch_button)
+	_watch_button.pressed.connect(_watch_match)
+	_watch_button.visible = false
+	column.add_child(_watch_button)
 
 	_game_over_layer.visible = false
 
