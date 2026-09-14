@@ -13,6 +13,7 @@ const BOARD_SCENE := "res://scenes/main.tscn"
 const VS_SCENE := "res://scenes/ui/vs_menu.tscn"
 
 var _room_label: Label
+var _invite_row: HBoxContainer
 var _code_label: Label
 var _copy_button: Button
 var _card_panels: Array[PanelContainer] = []
@@ -85,6 +86,7 @@ func _build_invite() -> HBoxContainer:
 	var row := HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 12)
+	_invite_row = row
 
 	var caption := Label.new()
 	caption.text = "CODE"
@@ -159,12 +161,15 @@ func _build_chat() -> PanelContainer:
 
 func _refresh() -> void:
 	_room_label.text = _room_line()
-	# The code is only worth showing for a private relay room. A LAN match is reached
-	# by address, and the common room is reached by the quick-match button, so neither
-	# has a code to hand to anybody.
-	var show_code: bool = Net.connected and Net.is_online_mode() and Net.room != Net.DEFAULT_ROOM
-	_code_label.visible = show_code
-	_copy_button.visible = show_code
+	# The code is only worth showing for a PRIVATE relay room — that is the whole
+	# difference between the two. A public room is found in the list instead, so showing
+	# a code there would invite the host to read out a string nobody needs; a LAN match
+	# is reached by address, and the common room by the quick-match button.
+	var show_code: bool = Net.connected and Net.is_online_mode() \
+		and not Net.public_room and Net.room != Net.DEFAULT_ROOM
+	# The whole invitation line hides together. Hiding only the code would leave the word
+	# "CODE" floating above nothing on a public or LAN room.
+	_invite_row.visible = show_code
 	if show_code:
 		_code_label.text = Net.room
 	for seat in _card_panels.size():
@@ -277,6 +282,12 @@ func _room_line() -> String:
 		return "Connexion en cours…"
 	if not Net.is_online_mode():
 		return "Partie locale — les autres rejoignent %s (port %d)" % [Net.address, Net.port]
+	# A public room has no code to share: it is found in the list, so the line says so
+	# rather than printing a string the host would be wrong to read out.
+	if Net.public_room:
+		if Net.active_count() <= 1:
+			return "Partie publique — en attente d'un joueur dans OUVERTES."
+		return "Partie publique — %d joueurs" % Net.active_count()
 	if Net.active_count() <= 1:
 		if Net.room == Net.DEFAULT_ROOM:
 			return "Salon commun — les autres te rejoignent avec PARTIE RAPIDE."
