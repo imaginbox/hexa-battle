@@ -32,6 +32,16 @@ signal castle_fell(owner_seat: int)
 ## leaving it out keeps movement a manual decision. Tick it to let a whole army
 ## fight on its own — see the HUD's "TIR" button, which arms the mode itself.
 @export var auto_attack_infantry: bool = false
+## Minimum seconds between two moves on the board, whoever makes them.
+##
+## Every move the board can take — a drag of yours, an automatic shot, the AI's turn —
+## goes through [method execute_march], so one gap here paces all of them together.
+##
+## Without it a wide board fires from every card at once, and the opponent's moves land on
+## top of each other: with automatic fire on, every ranged tile of yours opens up in the
+## same frame, and a levelled-up AI comes at you as fast as one move every 0.75 s. Pacing
+## turns that back into something you can watch happen.
+@export_range(0.0, 3.0, 0.05) var move_cooldown: float = 0.7
 
 ## How much a hovered target grows under the cursor while aiming.
 const HOVER_GROWTH := 1.08
@@ -139,6 +149,8 @@ var _applying_remote: bool = false
 ## Their clicks do nothing after that: an eliminated player may still be holding tiles
 ## elsewhere on the board, and being out has to mean out.
 var input_locked: bool = false
+## Seconds left before another move is allowed.
+var _cooldown_left: float = 0.0
 
 
 func _ready() -> void:
@@ -155,11 +167,14 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	_cooldown_left = maxf(_cooldown_left - delta, 0.0)
 	_run_board_sync(delta)
 	if GameState.auto_attack:
 		_run_auto_attacks(delta)
 	if selected_tile == null or not target_arrow.is_active:
 		return
+	# A move that cannot land yet should say so rather than look broken.
+	target_arrow.set_ready(can_move())
 	# The ribbon only locks on to a tile the selected unit can actually reach;
 	# on anything else it just follows the cursor.
 	if hovered_tile != null and is_valid_target(selected_tile, hovered_tile):
@@ -185,6 +200,12 @@ func _process(delta: float) -> void:
 ## ground, and moving your army stays a manual decision. Dragging keeps working
 ## for every class regardless.
 func _run_auto_attacks(delta: float) -> void:
+	# One move at a time for the whole board. Without this every ranged card of yours
+	# opens up in the same frame, which is the firing-from-everywhere this pacing exists
+	# to stop. The cards' own countdowns keep running while the board is busy, so nothing
+	# is lost — it is only spread out.
+	if not can_move():
+		return
 	for tile: HexTile in tiles.values():
 		if tile.owner_seat != GameState.local_seat:
 			continue
@@ -548,17 +569,30 @@ func _apply_reinforce(tile: HexTile) -> void:
 
 func execute_march(from: HexTile, to: HexTile) -> void:
 	# Enforced here rather than left to the call sites: every attacker, the AI
-	# included, comes through this one door, so nothing can out-range the rules.
+	# included, comes through this one door, so nothing can out-range the rules — and
+	# nothing can skip the pace either.
 	if not is_valid_target(from, to):
+		return
+	if not can_move():
 		return
 	if not _route("march", {"from": from.grid_coords, "to": to.grid_coords}):
 		return
 	_play_march(from, to)
 
 
+## Whether the board is ready for another move.
+func can_move() -> bool:
+	return _cooldown_left <= 0.0
+
+
 ## The march itself, split out of [method execute_march] so an action coming back from
 ## the table's owner runs the very same code a local drag does — pawn flight included.
+##
+## The pace is set here rather than in [method execute_march] on purpose: this is where a
+## move actually happens, whether it was decided locally or arrived from the table's
+## owner, so the gap measures the board rather than whoever asked.
 func _play_march(from: HexTile, to: HexTile) -> void:
+	_cooldown_left = move_cooldown
 	match from.unit_type:
 		HexTile.UnitType.ARCHER:
 			_fire_volley(from, to)

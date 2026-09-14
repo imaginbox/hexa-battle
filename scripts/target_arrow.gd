@@ -14,6 +14,11 @@ const PEAK_MIN := 0.8
 const PEAK_MAX := 3.0
 ## Lift above the tile face, so the ribbon is not buried inside the board.
 const LIFT := 0.4
+## Ribbon colour when the board is ready for the move being drawn, and when it is not.
+## The board paces moves, so a drag that will not land yet has to say so — otherwise the
+## release just does nothing and reads as a broken control.
+const COLOR_READY := Color("38b6ff")
+const COLOR_WAITING := Color("8b93a1")
 
 var mesh_instance: MeshInstance3D = MeshInstance3D.new()
 var immediate_mesh: ImmediateMesh = ImmediateMesh.new()
@@ -29,14 +34,22 @@ func _ready() -> void:
 	mesh_instance.mesh = immediate_mesh
 
 	# Matériau style Clay / Plastique bleu vibrant
-	arrow_material.albedo_color = Color("38b6ff")
+	arrow_material.albedo_color = COLOR_READY
 	arrow_material.roughness = 0.4
 	arrow_material.emission_enabled = true
-	arrow_material.emission = Color("0984e3")
+	arrow_material.emission = COLOR_READY.darkened(0.45)
 	arrow_material.emission_energy_multiplier = 0.5
 	arrow_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh_instance.material_override = arrow_material
 	visible = false
+
+
+## Tints the ribbon for whether the board would accept the move being aimed at. Called
+## every frame while aiming, so it only ever touches the two colours.
+func set_ready(ready: bool) -> void:
+	var tint: Color = COLOR_READY if ready else COLOR_WAITING
+	arrow_material.albedo_color = tint
+	arrow_material.emission = tint.darkened(0.45)
 
 
 func start_aiming(origin: Vector3) -> void:

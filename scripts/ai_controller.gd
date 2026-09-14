@@ -64,7 +64,10 @@ func _schedule() -> void:
 
 
 func _take_turn() -> void:
-	if active and _grid != null:
+	# The board paces every move. A turn taken while it is busy would be spent on nothing
+	# and then rescheduled as though it had happened, so the commander waits for the gap
+	# instead of quietly losing a turn to it.
+	if active and _grid != null and _grid.can_move():
 		_update_player_profile()
 		# Sabotage first: a mine pays for the whole enemy war effort. After that
 		# the AI leans on how the player has been playing — against someone who is
