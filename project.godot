@@ -18,6 +18,7 @@ config/icon="res://icon.svg"
 [autoload]
 
 Net="*res://scripts/network_manager.gd"
+Lobby="*res://scripts/lobby_directory.gd"
 
 [display]
 

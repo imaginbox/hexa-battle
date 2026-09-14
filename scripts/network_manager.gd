@@ -60,6 +60,9 @@ const CORNER_NAMES := ["corner Sud-Ouest", "corner Nord-Est", "corner Sud-Est", 
 var transport: Transport = Transport.RELAY
 ## Relay room name.
 var room: String = DEFAULT_ROOM
+## Whether the room this peer opens should be listed in the public directory. A private
+## match is found by its code; a public one is meant to be seen and joined by anyone.
+var public_room: bool = false
 ## ENet address this peer last tried to reach, shown back in the lobby.
 var address: String = DEFAULT_ADDRESS
 ## Port the ENet server listens on and clients dial. Fixed, so joining is one field.
@@ -139,6 +142,20 @@ func _process(delta: float) -> void:
 	_heartbeat_left = HEARTBEAT_INTERVAL
 	_heartbeat.rpc()
 	_prune_silent_peers()
+	_refresh_publication()
+
+
+## Keeps the public directory entry for this room alive while it is ours to advertise.
+##
+## Only the table's owner publishes — a joiner must not advertise a room it does not
+## hold, and the owner is also the one whose departure should take the entry down. The
+## count travels with it so the list can say "1/4" rather than just naming rooms, and
+## it is refreshed from the live table each beat so it follows people joining.
+func _refresh_publication() -> void:
+	if not public_room or not is_host() or started:
+		Lobby.unpublish()
+		return
+	Lobby.publish(room, active_count())
 
 
 ## Says "still here" to the room. Every peer stamps the sender on arrival, which is
@@ -226,6 +243,10 @@ func _select_transport(value: Transport) -> void:
 
 func leave_room() -> void:
 	_teardown()
+	# A private room is the default, so the next match starts private unless its host
+	# says otherwise — a public listing is a decision, never something left over from
+	# the last game.
+	public_room = false
 	session_ended.emit()
 	seats_changed.emit()
 
@@ -286,6 +307,9 @@ func _teardown() -> void:
 	started = false
 	_reset_slots()
 	_table_owner = 0
+	# Leaving takes the room off the public list at once, rather than letting it hang
+	# there until the entry times out on everybody else's screen.
+	Lobby.unpublish()
 	# Presence is per-room, so it dies with the connection. Keeping the stamps would
 	# carry a stale "who I knew" into the next match.
 	_last_seen.clear()
