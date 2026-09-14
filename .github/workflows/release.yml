@@ -1,0 +1,75 @@
+name: Build the desktop versions and publish them
+
+# A tag publishes a version (v1, v1.1 ...), and the button in the Actions tab does the same
+# on demand — so a build to hand out for a LAN match does not need a version number first.
+#
+# The desktop builds exist because a browser has no raw sockets: only a native build can
+# host or join a match over a local network, which is the one way to play with somebody
+# while the relay is out of reach.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Same version as the web workflow, and the same folder naming rule: it must match the
+  # Godot the project is built with, or the export finds no templates.
+  GODOT_VERSION: 4.7.1
+  GODOT_RELEASE: 4.7.1-stable
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Godot and its export templates
+        run: |
+          set -euo pipefail
+          base="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
+          curl -sSL -o godot.zip  "${base}/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          curl -sSL -o templates.tpz "${base}/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          unzip -q godot.zip
+          chmod +x "Godot_v${GODOT_RELEASE}_linux.x86_64"
+          sudo mv "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          mkdir -p "$HOME/.local/share/godot/export_templates"
+          unzip -q templates.tpz
+          mv templates "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+
+      - name: Import the project
+        run: godot --headless --path . --import || godot --headless --path . --editor --quit
+
+      - name: Build the three desktop versions
+        run: |
+          set -euo pipefail
+          mkdir -p build/windows build/linux build/macos
+          godot --headless --path . --export-release "Windows Desktop" build/windows/HexaBattle.exe
+          godot --headless --path . --export-release "Linux" build/linux/HexaBattle.x86_64
+          godot --headless --path . --export-release "macOS" build/macos/HexaBattle.zip
+          # Renamed after the platform, so the download list says what each one is.
+          mv build/windows/HexaBattle.exe  build/HexaBattle-windows.exe
+          mv build/linux/HexaBattle.x86_64 build/HexaBattle-linux.x86_64
+          mv build/macos/HexaBattle.zip    build/HexaBattle-macos.zip
+          chmod +x build/HexaBattle-linux.x86_64
+          ls -lh build/
+
+      - name: Publish them as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="build-$(date -u +%Y%m%d-%H%M)"
+          fi
+          # gh ships with the runners, so this needs no third-party release action.
+          gh release create "$tag" \
+            build/HexaBattle-windows.exe \
+            build/HexaBattle-linux.x86_64 \
+            build/HexaBattle-macos.zip \
+            --title "Hexa Battle $tag" \
+            --generate-notes
