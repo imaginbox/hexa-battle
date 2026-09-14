@@ -92,6 +92,27 @@ var _relay_attempts: int = 0
 ## Set while a retry is already pending, so two failures cannot stack loops.
 var _relay_retry_pending: bool = false
 
+## How often a peer tells the room it is still there, in seconds.
+const HEARTBEAT_INTERVAL := 1.5
+## How long a peer may stay silent before it is treated as gone, in milliseconds.
+##
+## The relay is a message switch, not a server: it does not prune its own peer list,
+## and Godot's `get_peers()` keeps reporting a peer that has stopped running. That is
+## not a rare case here — a browser tab in the background has its requestAnimationFrame
+## loop frozen, so a web peer goes completely silent while its socket stays open. The
+## room then has a member that never answers, still holding the lowest id, and on a
+## relay the lowest id **is** the table owner: nobody can be seated, and the ready
+## button stays grey for ever. Counting only peers that have proved they are alive is
+## what stops one abandoned tab from freezing the whole lobby.
+const PEER_TIMEOUT_MS := 10000
+## Last time each peer was heard from, keyed by peer id, in [method Time.get_ticks_msec].
+var _last_seen: Dictionary = {}
+## Peers this node has already met in this session. Kept separately from [_last_seen]
+## so an expired peer is not mistaken for a newcomer and given the benefit of the doubt
+## all over again — it is known, and no longer answering, and that is the whole signal.
+var _known_peers: Dictionary = {}
+var _heartbeat_left: float = 0.0
+
 
 func _ready() -> void:
 	multiplayer.peer_connected.connect(_on_peer_connected)
@@ -104,6 +125,56 @@ func _ready() -> void:
 	seats_changed.connect(_publish_table)
 	_reset_slots()
 	_publish_table()
+	# The relay never prunes its own member list, so presence has to be proven rather
+	# than assumed. This is the only clock the whole presence scheme needs.
+	set_process(true)
+
+
+func _process(delta: float) -> void:
+	if transport != Transport.RELAY or not connected:
+		return
+	_heartbeat_left -= delta
+	if _heartbeat_left > 0.0:
+		return
+	_heartbeat_left = HEARTBEAT_INTERVAL
+	_heartbeat.rpc()
+	_prune_silent_peers()
+
+
+## Says "still here" to the room. Every peer stamps the sender on arrival, which is
+## what [method _prune_silent_peers] reads. A local call is used so a peer also stamps
+## itself and can never time out on its own heartbeat.
+@rpc("any_peer", "call_local", "unreliable")
+func _heartbeat() -> void:
+	var sender: int = multiplayer.get_remote_sender_id()
+	if sender == 0:
+		sender = multiplayer.get_unique_id()
+	_last_seen[sender] = Time.get_ticks_msec()
+	_known_peers[sender] = true
+
+
+## Drops every known peer that has gone quiet for [constant PEER_TIMEOUT_MS]. When the
+## one that fell silent is the owner, authority is re-elected immediately rather than
+## waiting for a disconnection the relay will never deliver.
+func _prune_silent_peers() -> void:
+	var now: int = Time.get_ticks_msec()
+	var dropped: bool = false
+	for peer: int in _last_seen.keys():
+		if peer == multiplayer.get_unique_id():
+			continue
+		if now - int(_last_seen[peer]) > PEER_TIMEOUT_MS:
+			_last_seen.erase(peer)
+			dropped = true
+	if not dropped:
+		return
+	_refresh_table_owner(true)
+	if is_host():
+		# We just inherited the table: publish it so everyone is seated, rather than
+		# leaving the room waiting for an owner that will never speak again.
+		_rebuild_slots()
+		_broadcast_table()
+	else:
+		seats_changed.emit()
 
 
 ## Mirrors the table into [GameState], which is where the board reads it from. See
@@ -215,6 +286,11 @@ func _teardown() -> void:
 	started = false
 	_reset_slots()
 	_table_owner = 0
+	# Presence is per-room, so it dies with the connection. Keeping the stamps would
+	# carry a stale "who I knew" into the next match.
+	_last_seen.clear()
+	_known_peers.clear()
+	_heartbeat_left = 0.0
 
 
 # --- Ouverture des deux transports ---------------------------------------------
@@ -486,12 +562,23 @@ func _on_server_disconnected() -> void:
 	failed.emit("L'hôte a fermé la partie.")
 
 
-## Relay only: real peers are everyone above the phantom slot the relay owns.
+## Relay only: real peers are everyone above the phantom slot the relay owns, and only
+## those that have proved they are alive. A peer the relay still lists but that has
+## gone silent is treated as gone — see [constant PEER_TIMEOUT_MS] for why that matters
+## on this transport specifically.
 func _real_peers() -> Array[int]:
+	var now: int = Time.get_ticks_msec()
 	var out: Array[int] = []
 	for p in multiplayer.get_peers():
-		if int(p) > SERVER_ID:
-			out.append(int(p))
+		var id: int = int(p)
+		if id <= SERVER_ID:
+			continue
+		# A peer only just met may not be stamped yet (its first heartbeat can still be
+		# in flight); give it the benefit of the doubt. A peer already known and silent
+		# past the window is gone, however loudly the relay still lists it.
+		if _known_peers.has(id) and now - int(_last_seen.get(id, 0)) > PEER_TIMEOUT_MS:
+			continue
+		out.append(id)
 	return out
 
 
