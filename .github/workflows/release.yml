@@ -43,19 +43,21 @@ jobs:
       - name: Import the project
         run: godot --headless --path . --import || godot --headless --path . --editor --quit
 
-      - name: Build the three desktop versions
+      - name: Build the desktop versions
         run: |
           set -euo pipefail
-          mkdir -p build/windows build/linux build/macos
+          mkdir -p build/windows build/linux
           godot --headless --path . --export-release "Windows Desktop" build/windows/HexaBattle.exe
           godot --headless --path . --export-release "Linux" build/linux/HexaBattle.x86_64
-          godot --headless --path . --export-release "macOS" build/macos/HexaBattle.zip
           # Renamed after the platform, so the download list says what each one is.
           mv build/windows/HexaBattle.exe  build/HexaBattle-windows.exe
           mv build/linux/HexaBattle.x86_64 build/HexaBattle-linux.x86_64
-          mv build/macos/HexaBattle.zip    build/HexaBattle-macos.zip
           chmod +x build/HexaBattle-linux.x86_64
           ls -lh build/
+        # macOS is deliberately absent: its export needs ETC2/ASTC texture variants enabled
+        # project-wide, and an unsigned .app is refused by Gatekeeper anyway — most people
+        # cannot open one without knowing the right-click trick. Worth adding only alongside
+        # a signing certificate.
 
       - name: Publish them as a release
         env:
@@ -70,6 +72,5 @@ jobs:
           gh release create "$tag" \
             build/HexaBattle-windows.exe \
             build/HexaBattle-linux.x86_64 \
-            build/HexaBattle-macos.zip \
             --title "Hexa Battle $tag" \
             --generate-notes
