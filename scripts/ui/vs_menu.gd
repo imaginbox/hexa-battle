@@ -41,10 +41,12 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
-	# Browsing is only needed while this screen is up, and the lobby channel is a whole
-	# extra socket. Closing on the way out keeps a match from carrying a second, idle
-	# connection it never uses.
-	Lobby.close()
+	# Stop listening when the screen goes away: the list is this screen's job. This is
+	# only the *browsing* half — a host still needs the channel to announce its room,
+	# and that half keeps the channel alive on its own. Closing it outright here would
+	# silence the very room this screen just opened, which is how a public game ended
+	# up invisible to everybody else.
+	Lobby.set_browsing(false)
 
 
 func _build() -> void:
@@ -194,11 +196,11 @@ func _sync_transport_ui() -> void:
 		_target_edit.placeholder_text = "vide → code au hasard"
 		# Opening the channel here is what makes the list appear at all; it stays up
 		# for as long as the screen does.
-		Lobby.open()
+		Lobby.set_browsing(true)
 	else:
 		_target_edit.text = Net.address
 		_target_edit.placeholder_text = Net.DEFAULT_ADDRESS
-		Lobby.close()
+		Lobby.set_browsing(false)
 	UiStyle.set_toggle(_mode_online, online)
 	UiStyle.set_toggle(_mode_local, not online)
 	_refresh_list()

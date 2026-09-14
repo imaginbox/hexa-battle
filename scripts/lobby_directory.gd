@@ -57,12 +57,40 @@ func _ready() -> void:
 
 # --- Canal ----------------------------------------------------------------
 
-## Opens the lobby channel. Safe to call repeatedly; a second call while open does
-## nothing. A failure is silent on purpose — browsing is a convenience, and the
-## private-code path must keep working whether or not it is available.
-func open() -> void:
-	if _peer != null:
-		return
+## Why the lobby channel is needed. Two independent reasons, and the channel lives as
+## long as at least one of them holds: a browsing screen wants to hear about rooms, and
+## a host wants to be heard. Keeping them separate is what stops the host's own
+## announcement from being cut off the moment the join screen closes — which is exactly
+## where a host stands while waiting for somebody.
+var _want_browse: bool = false
+var _want_publish: bool = false
+
+
+## Asked for while the join screen is up.
+func set_browsing(value: bool) -> void:
+	_want_browse = value
+	_sync_channel()
+
+
+## Asked for by a host whose room should appear in the list.
+func set_publishing(value: bool) -> void:
+	_want_publish = value
+	_sync_channel()
+
+
+## Opens or closes the channel to match the current needs. Idempotent, so either
+## caller can ask without knowing what the other wants.
+func _sync_channel() -> void:
+	var wanted: bool = _want_browse or _want_publish
+	if wanted and _peer == null:
+		_open()
+	elif not wanted and _peer != null:
+		_close()
+
+
+## Opens the lobby channel. A failure is silent on purpose — browsing is a convenience,
+## and the private-code path must keep working whether or not it is available.
+func _open() -> void:
 	_flush_dns()
 	IP.clear_cache(_relay_host())
 	var url: String = _relay_url(LOBBY_ROOM)
@@ -79,7 +107,7 @@ func open() -> void:
 
 
 ## Closes the lobby channel and forgets every room heard on it.
-func close() -> void:
+func _close() -> void:
 	if _peer != null:
 		_peer.close()
 	_peer = null
@@ -115,17 +143,22 @@ func lobby_connected() -> bool:
 
 ## Announces `code` as an open room holding `count` players. Called by a host; the
 ## announcement is repeated on a timer until [method unpublish].
+##
+## Publishing is itself a reason to hold the channel open, so a host that never visits
+## the join screen still gets heard.
 func publish(code: String, count: int) -> void:
 	_published_code = code
 	_published_count = count
 	_publish_left = 0.0
+	set_publishing(true)
 
 
-## Stops announcing. The entry disappears from other players' lists on its own once it
-## stops being refreshed.
+## Stops announcing, and lets the channel close if nothing else needs it. The entry
+## disappears from other players' lists on its own once it stops being refreshed.
 func unpublish() -> void:
 	_published_code = ""
 	_published_count = 0
+	set_publishing(false)
 
 
 ## Every open room heard from recently, oldest announcement first. Read by the VS
