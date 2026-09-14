@@ -99,6 +99,18 @@ func is_open() -> bool:
 	return _peer != null
 
 
+## Whether the lobby channel is actually connected, as opposed to merely opened. The
+## screen uses this to say "recherche en cours…" rather than showing an empty list as
+## though the search had finished.
+##
+## Named `lobby_connected` rather than `is_connected`: [Object] already declares
+## `is_connected(signal, callable)`, and an override with a different signature is a
+## compile error — which, on an autoload, takes the whole game's connection code down
+## with it.
+func lobby_connected() -> bool:
+	return _connected
+
+
 # --- Publication ----------------------------------------------------------
 
 ## Announces `code` as an open room holding `count` players. Called by a host; the
