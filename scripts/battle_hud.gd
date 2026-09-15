@@ -418,12 +418,14 @@ func _layout_cells(tile: HexTile) -> void:
 	for i in count:
 		# Straight down on screen is a quarter turn, and the arc spreads evenly either side.
 		var angle: float = PI * 0.5 - span * 0.5 + step * float(i)
-		var offset: Vector2 = Vector2(cos(angle), sin(angle)) * radius
-		offsets.append(offset)
-		left = minf(left, offset.x)
-		right = maxf(right, offset.x)
-		top = minf(top, offset.y)
-		bottom = maxf(bottom, offset.y)
+		# Called `spot` rather than `offset`: CanvasLayer already declares an `offset`
+		# property, and a local shadowing it makes the engine log a warning for the file.
+		var spot: Vector2 = Vector2(cos(angle), sin(angle)) * radius
+		offsets.append(spot)
+		left = minf(left, spot.x)
+		right = maxf(right, spot.x)
+		top = minf(top, spot.y)
+		bottom = maxf(bottom, spot.y)
 	left -= CELL * 0.5
 	right += CELL * 0.5
 	top -= CELL * 0.5

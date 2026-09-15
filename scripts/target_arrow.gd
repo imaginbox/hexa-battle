@@ -45,9 +45,11 @@ func _ready() -> void:
 
 
 ## Tints the ribbon for whether the board would accept the move being aimed at. Called
-## every frame while aiming, so it only ever touches the two colours.
-func set_ready(ready: bool) -> void:
-	var tint: Color = COLOR_READY if ready else COLOR_WAITING
+## every frame while aiming, so it only ever touches the two colours. Named `can_fire`
+## rather than `ready`: Node already declares a `ready` signal, and shadowing it makes the
+## engine log a warning for every file that so much as mentions this one.
+func set_ready(can_fire: bool) -> void:
+	var tint: Color = COLOR_READY if can_fire else COLOR_WAITING
 	arrow_material.albedo_color = tint
 	arrow_material.emission = tint.darkened(0.45)
 
