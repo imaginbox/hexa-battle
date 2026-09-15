@@ -265,6 +265,23 @@ func local_transport_available() -> bool:
 	return not OS.has_feature("web")
 
 
+## This machine's addresses on a network, so a host over ENet can read one out to the others.
+##
+## A machine has one address per interface and Godot has no notion of which is the useful
+## one, so loopback and the self-assigned 169.254 range are dropped: neither is something
+## anybody can type into another player's lobby field. IPv6 goes too, since an address with
+## colons in it is not what a player reads out across a table.
+func local_addresses() -> Array[String]:
+	var out: Array[String] = []
+	for address: String in IP.get_local_addresses():
+		if address.contains(":"):
+			continue
+		if address.begins_with("127.") or address.begins_with("169.254."):
+			continue
+		out.append(address)
+	return out
+
+
 ## Ignored while connected, so a live match can never have its transport changed
 ## under it.
 func _select_transport(value: Transport) -> void:

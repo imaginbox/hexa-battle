@@ -281,7 +281,15 @@ func _room_line() -> String:
 	if not Net.connected:
 		return "Connexion en cours…"
 	if not Net.is_online_mode():
-		return "Partie locale — les autres rejoignent %s (port %d)" % [Net.address, Net.port]
+		# Over ENet the host is the server, and the address the others need is *this
+		# machine's* — not whatever was typed into the field to reach somebody else's.
+		if not Net.is_host():
+			return "Partie locale — connecté à %s:%d" % [Net.address, Net.port]
+		var mine: Array[String] = Net.local_addresses()
+		if mine.is_empty():
+			return "Partie locale — les autres entrent ton adresse, port %d" % Net.port
+		return "Partie locale — les autres entrent %s, port %d" % [
+			" ou ".join(mine), Net.port]
 	# A public room has no code to share: it is found in the list, so the line says so
 	# rather than printing a string the host would be wrong to read out.
 	if Net.public_room:
